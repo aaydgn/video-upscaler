@@ -1,0 +1,11 @@
+.venv/
+.uv-cache/
+.uv-python/
+__pycache__/
+*.py[cod]
+.python-version
+
+dist/
+output/
+*_1080p.mp4
+*.log

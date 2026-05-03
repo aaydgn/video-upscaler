@@ -1,0 +1,10 @@
+[project]
+name = "video-upscaler"
+version = "0.1.0"
+description = "NVIDIA/FFmpeg 720p to 1080p video upscaler with a small Tkinter UI."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false
