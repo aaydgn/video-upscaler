@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,7 @@ TARGET_HEIGHT = 1080
 class ToolInfo:
     ffmpeg: str
     ffprobe: str
+    realesrgan: str | None
     has_cuda_scale: bool
     has_npp_scale: bool
     has_h264_nvenc: bool
@@ -55,6 +57,21 @@ def find_executable(name: str) -> str | None:
         except (StopIteration, PermissionError, OSError):
             continue
         return str(match)
+    return None
+
+
+def find_realesrgan() -> str | None:
+    found = shutil.which("realesrgan-ncnn-vulkan")
+    if found:
+        return found
+
+    candidates = [
+        Path("C:/Tools/realesrgan-ncnn-vulkan/realesrgan-ncnn-vulkan.exe"),
+        Path.cwd() / "tools" / "realesrgan-ncnn-vulkan" / "realesrgan-ncnn-vulkan.exe",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
     return None
 
 
@@ -89,6 +106,7 @@ def inspect_tools(ffmpeg_path: str | None = None, ffprobe_path: str | None = Non
     return ToolInfo(
         ffmpeg=ffmpeg,
         ffprobe=ffprobe,
+        realesrgan=find_realesrgan(),
         has_cuda_scale="scale_cuda" in filters,
         has_npp_scale="scale_npp" in filters,
         has_h264_nvenc="h264_nvenc" in encoders,
@@ -96,7 +114,25 @@ def inspect_tools(ffmpeg_path: str | None = None, ffprobe_path: str | None = Non
     )
 
 
-def probe_video(ffprobe: str, input_path: Path) -> tuple[int | None, int | None, float | None]:
+def parse_fraction(value: str | None) -> float | None:
+    if not value or value == "0/0":
+        return None
+    if "/" in value:
+        numerator, denominator = value.split("/", 1)
+        try:
+            denominator_float = float(denominator)
+            if denominator_float == 0:
+                return None
+            return float(numerator) / denominator_float
+        except ValueError:
+            return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def probe_video(ffprobe: str, input_path: Path) -> tuple[int | None, int | None, float | None, float | None]:
     output = run_capture(
         [
             ffprobe,
@@ -105,7 +141,7 @@ def probe_video(ffprobe: str, input_path: Path) -> tuple[int | None, int | None,
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,duration",
+            "stream=width,height,duration,avg_frame_rate,r_frame_rate",
             "-of",
             "json",
             str(input_path),
@@ -114,14 +150,32 @@ def probe_video(ffprobe: str, input_path: Path) -> tuple[int | None, int | None,
     data = json.loads(output)
     streams = data.get("streams", [])
     if not streams:
-        return None, None, None
+        return None, None, None, None
     stream = streams[0]
     duration_raw = stream.get("duration")
     try:
         duration = float(duration_raw) if duration_raw is not None else None
     except ValueError:
         duration = None
-    return stream.get("width"), stream.get("height"), duration
+    fps = parse_fraction(stream.get("avg_frame_rate")) or parse_fraction(stream.get("r_frame_rate"))
+    return stream.get("width"), stream.get("height"), duration, fps
+
+
+def stream_command(args: list[str], log: Callable[[str], None], cwd: str | None = None) -> int:
+    log(subprocess.list2cmdline(args))
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        log(line.rstrip())
+    return process.wait()
 
 
 def build_ffmpeg_command(
@@ -188,6 +242,8 @@ def build_ffmpeg_command(
 def upscale(
     input_file: str,
     output_file: str | None = None,
+    engine: str = "ai",
+    model: str = "realesrgan-x4plus",
     codec: str = "h264",
     quality: int = 19,
     overwrite: bool = False,
@@ -203,7 +259,7 @@ def upscale(
         else input_path.with_name(f"{input_path.stem}_1080p.mp4")
     )
     tools = inspect_tools()
-    width, height, duration = probe_video(tools.ffprobe, input_path)
+    width, height, duration, fps = probe_video(tools.ffprobe, input_path)
     if width and height:
         log(f"Input: {width}x{height}")
         if width != 1280 or height != 720:
@@ -212,6 +268,8 @@ def upscale(
         log(f"Duration: {duration:.1f}s")
 
     log(f"FFmpeg: {tools.ffmpeg}")
+    if tools.realesrgan:
+        log(f"Real-ESRGAN: {tools.realesrgan}")
     log(
         "Acceleration: "
         + (
@@ -222,27 +280,131 @@ def upscale(
             else "CPU scale with NVENC encode"
         )
     )
-    cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite)
-    log("Running:")
-    log(subprocess.list2cmdline(cmd))
-
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    assert process.stdout is not None
-    for line in process.stdout:
-        log(line.rstrip())
-    return_code = process.wait()
+    if engine == "ai":
+        if not tools.realesrgan:
+            raise RuntimeError("Real-ESRGAN was not found. Install realesrgan-ncnn-vulkan or use --engine ffmpeg.")
+        if not fps:
+            fps = 30.0
+            log("Warning: could not detect frame rate; using 30 fps.")
+        return_code = upscale_with_realesrgan(tools, input_path, output_path, model, codec, quality, overwrite, fps, log)
+    else:
+        cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite)
+        log("Running FFmpeg scaler:")
+        return_code = stream_command(cmd, log)
     if return_code == 0:
         log(f"Done: {output_path}")
     else:
         log(f"FFmpeg failed with exit code {return_code}")
     return return_code
+
+
+def upscale_with_realesrgan(
+    tools: ToolInfo,
+    input_path: Path,
+    output_path: Path,
+    model: str,
+    codec: str,
+    quality: int,
+    overwrite: bool,
+    fps: float,
+    log: Callable[[str], None],
+) -> int:
+    assert tools.realesrgan is not None
+    exe = Path(tools.realesrgan)
+    temp_path = output_path.parent / f"{output_path.stem}_work_{uuid.uuid4().hex[:8]}"
+    try:
+        temp_path.mkdir(parents=True, exist_ok=False)
+        frames_dir = temp_path / "frames"
+        ai_dir = temp_path / "ai_frames"
+        frames_dir.mkdir()
+        ai_dir.mkdir()
+
+        log("Extracting frames...")
+        extract_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(input_path),
+            str(frames_dir / "frame_%08d.png"),
+        ]
+        code = stream_command(extract_cmd, log)
+        if code != 0:
+            return code
+
+        log("Running Real-ESRGAN AI upscaling. This should take much longer than a few seconds.")
+        ai_cmd = [
+            str(exe),
+            "-i",
+            str(frames_dir),
+            "-o",
+            str(ai_dir),
+            "-n",
+            model,
+            "-s",
+            "2",
+            "-g",
+            "0",
+            "-f",
+            "png",
+        ]
+        code = stream_command(ai_cmd, log, cwd=str(exe.parent))
+        if code != 0:
+            return code
+
+        if codec == "hevc" and tools.has_hevc_nvenc:
+            video_encoder = "hevc_nvenc"
+        elif tools.has_h264_nvenc:
+            video_encoder = "h264_nvenc"
+        else:
+            video_encoder = "libx264"
+
+        log("Reassembling video and copying audio...")
+        assemble_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-stats",
+            "-y" if overwrite else "-n",
+            "-framerate",
+            f"{fps:.6f}",
+            "-i",
+            str(ai_dir / "frame_%08d.png"),
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a?",
+            "-map",
+            "1:s?",
+            "-vf",
+            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos",
+            "-c:v",
+            video_encoder,
+            "-preset",
+            "p6" if video_encoder.endswith("_nvenc") else "slow",
+            "-cq",
+            str(quality),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        return stream_command(assemble_cmd, log)
+    finally:
+        try:
+            if temp_path.exists():
+                shutil.rmtree(temp_path)
+        except OSError as exc:
+            log(f"Warning: could not remove work folder {temp_path}: {exc}")
 
 
 def launch_gui() -> None:
@@ -256,6 +418,8 @@ def launch_gui() -> None:
 
     input_var = tk.StringVar()
     output_var = tk.StringVar()
+    engine_var = tk.StringVar(value="ai")
+    model_var = tk.StringVar(value="realesrgan-x4plus")
     codec_var = tk.StringVar(value="h264")
     quality_var = tk.IntVar(value=19)
     overwrite_var = tk.BooleanVar(value=False)
@@ -311,6 +475,8 @@ def launch_gui() -> None:
                 code = upscale(
                     input_var.get(),
                     output_var.get() or None,
+                    engine_var.get(),
+                    model_var.get(),
                     codec_var.get(),
                     quality_var.get(),
                     overwrite_var.get(),
@@ -328,7 +494,7 @@ def launch_gui() -> None:
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(6, weight=1)
+    frame.rowconfigure(8, weight=1)
 
     ttk.Label(frame, text="Input video").grid(row=0, column=0, sticky="w", pady=4)
     ttk.Entry(frame, textvariable=input_var).grid(row=0, column=1, sticky="ew", padx=8)
@@ -344,21 +510,36 @@ def launch_gui() -> None:
     ttk.Radiobutton(codec_frame, text="H.264 NVENC", value="h264", variable=codec_var).pack(side="left")
     ttk.Radiobutton(codec_frame, text="HEVC NVENC", value="hevc", variable=codec_var).pack(side="left", padx=16)
 
-    ttk.Label(frame, text="Quality").grid(row=3, column=0, sticky="w", pady=4)
-    ttk.Scale(frame, from_=14, to=28, variable=quality_var, orient="horizontal").grid(
-        row=3, column=1, sticky="ew", padx=8
+    ttk.Label(frame, text="Engine").grid(row=3, column=0, sticky="w", pady=4)
+    engine_frame = ttk.Frame(frame)
+    engine_frame.grid(row=3, column=1, sticky="w", padx=8)
+    ttk.Radiobutton(engine_frame, text="AI Real-ESRGAN", value="ai", variable=engine_var).pack(side="left")
+    ttk.Radiobutton(engine_frame, text="Fast FFmpeg scale", value="ffmpeg", variable=engine_var).pack(side="left", padx=16)
+
+    ttk.Label(frame, text="AI model").grid(row=4, column=0, sticky="w", pady=4)
+    model_combo = ttk.Combobox(
+        frame,
+        textvariable=model_var,
+        values=("realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"),
+        state="readonly",
     )
-    ttk.Label(frame, textvariable=quality_var, width=4).grid(row=3, column=2, sticky="w")
+    model_combo.grid(row=4, column=1, sticky="ew", padx=8)
+
+    ttk.Label(frame, text="Quality").grid(row=5, column=0, sticky="w", pady=4)
+    ttk.Scale(frame, from_=14, to=28, variable=quality_var, orient="horizontal").grid(
+        row=5, column=1, sticky="ew", padx=8
+    )
+    ttk.Label(frame, textvariable=quality_var, width=4).grid(row=5, column=2, sticky="w")
 
     ttk.Checkbutton(frame, text="Overwrite output if it exists", variable=overwrite_var).grid(
-        row=4, column=1, sticky="w", padx=8, pady=4
+        row=6, column=1, sticky="w", padx=8, pady=4
     )
 
     start_button = ttk.Button(frame, text="Upscale to 1080p", command=start)
-    start_button.grid(row=5, column=1, sticky="w", padx=8, pady=10)
+    start_button.grid(row=7, column=1, sticky="w", padx=8, pady=10)
 
     log_box = tk.Text(frame, height=14, state="disabled", wrap="word")
-    log_box.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+    log_box.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
 
     drain_messages()
     root.mainloop()
@@ -368,6 +549,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upscale a video to 1080p using NVIDIA FFmpeg acceleration.")
     parser.add_argument("input", nargs="?", help="Input video path. Omit to launch the Tkinter UI.")
     parser.add_argument("-o", "--output", help="Output video path. Defaults to <input>_1080p.mp4.")
+    parser.add_argument("--engine", choices=["ai", "ffmpeg"], default="ai", help="Use AI Real-ESRGAN or fast FFmpeg scale.")
+    parser.add_argument(
+        "--model",
+        choices=["realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"],
+        default="realesrgan-x4plus",
+        help="Real-ESRGAN model to use with --engine ai.",
+    )
     parser.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="NVENC codec to use.")
     parser.add_argument("--quality", type=int, default=19, help="NVENC CQ value, lower is larger/better. Default: 19.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output file if it exists.")
@@ -389,11 +577,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"scale_npp: {'yes' if tools.has_npp_scale else 'no'}")
         print(f"h264_nvenc: {'yes' if tools.has_h264_nvenc else 'no'}")
         print(f"hevc_nvenc: {'yes' if tools.has_hevc_nvenc else 'no'}")
+        print(f"realesrgan: {tools.realesrgan or 'not found'}")
         return 0
     if not args.input:
         launch_gui()
         return 0
-    return upscale(args.input, args.output, args.codec, args.quality, args.overwrite)
+    return upscale(args.input, args.output, args.engine, args.model, args.codec, args.quality, args.overwrite)
 
 
 if __name__ == "__main__":

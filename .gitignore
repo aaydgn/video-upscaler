@@ -7,5 +7,7 @@ __pycache__/
 
 dist/
 output/
+*_work_*/
+upscale_*/
 *_1080p.mp4
 *.log
