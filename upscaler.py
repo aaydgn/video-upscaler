@@ -623,8 +623,8 @@ def launch_gui() -> None:
 
     input_var = tk.StringVar()
     output_var = tk.StringVar()
-    ai_var = tk.BooleanVar(value=True)
-    enhance_var = tk.BooleanVar(value=False)
+    ai_var = tk.BooleanVar(value=False)
+    enhance_var = tk.BooleanVar(value=True)
     scale_var = tk.BooleanVar(value=False)
     model_var = tk.StringVar(value="realesrgan-x4plus")
     codec_var = tk.StringVar(value="h264")
