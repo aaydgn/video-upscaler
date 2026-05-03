@@ -43,6 +43,8 @@ uv run python upscaler.py --check
 You should see `h264_nvenc: yes`. `scale_cuda` or `scale_npp` is ideal, but the
 script can still use NVENC encoding if only CPU scaling is available.
 For AI upscaling, `realesrgan` should show a path instead of `not found`.
+For the fast enhancement mode, `cas`, `deblock`, and `hqdn3d` should ideally
+show `yes`.
 
 ## UI
 
@@ -102,6 +104,17 @@ Use the old fast scaler when you only want a resize:
 ```powershell
 uv run python upscaler.py input.mp4 --engine ffmpeg
 ```
+
+For a source that is already 1080p but looks soft, try the fast enhancement
+pass first:
+
+```powershell
+uv run python upscaler.py input.mp4 --engine enhance
+```
+
+This keeps the final output at `1920x1080`, applies weak deblocking, light
+denoising, and CAS sharpening, then encodes with NVENC. It is much faster than
+AI 2x from a 1080p source.
 
 For animation/anime content, try:
 

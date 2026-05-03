@@ -34,6 +34,9 @@ class ToolInfo:
     realesrgan: str | None
     has_cuda_scale: bool
     has_npp_scale: bool
+    has_cas: bool
+    has_deblock: bool
+    has_hqdn3d: bool
     has_h264_nvenc: bool
     has_hevc_nvenc: bool
 
@@ -111,6 +114,9 @@ def inspect_tools(ffmpeg_path: str | None = None, ffprobe_path: str | None = Non
         realesrgan=find_realesrgan(),
         has_cuda_scale="scale_cuda" in filters,
         has_npp_scale="scale_npp" in filters,
+        has_cas=" cas " in filters,
+        has_deblock=" deblock " in filters,
+        has_hqdn3d=" hqdn3d " in filters,
         has_h264_nvenc="h264_nvenc" in encoders,
         has_hevc_nvenc="hevc_nvenc" in encoders,
     )
@@ -334,6 +340,67 @@ def build_ffmpeg_command(
     return cmd
 
 
+def build_enhance_command(
+    tools: ToolInfo,
+    input_path: Path,
+    output_path: Path,
+    codec: str,
+    quality: int,
+    overwrite: bool,
+) -> list[str]:
+    if codec == "hevc" and tools.has_hevc_nvenc:
+        video_encoder = "hevc_nvenc"
+    elif tools.has_h264_nvenc:
+        video_encoder = "h264_nvenc"
+    elif tools.has_hevc_nvenc:
+        video_encoder = "hevc_nvenc"
+    else:
+        raise RuntimeError("This FFmpeg build does not expose h264_nvenc or hevc_nvenc.")
+
+    filters = []
+    if tools.has_deblock:
+        filters.append("deblock=filter=weak:block=8")
+    if tools.has_hqdn3d:
+        filters.append("hqdn3d=1.2:1.2:4:4")
+    if tools.has_cas:
+        filters.append("cas=strength=0.45")
+    else:
+        filters.append("unsharp=5:5:0.45:3:3:0.15")
+    filters.append(f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos")
+
+    return [
+        tools.ffmpeg,
+        "-hide_banner",
+        "-stats",
+        "-y" if overwrite else "-n",
+        "-i",
+        str(input_path),
+        "-map",
+        "0",
+        "-vf",
+        ",".join(filters),
+        "-c:v",
+        video_encoder,
+        "-preset",
+        "p6",
+        "-rc",
+        "vbr",
+        "-cq",
+        str(quality),
+        "-b:v",
+        "0",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        "-c:s",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+
 def upscale(
     input_file: str,
     output_file: str | None = None,
@@ -352,13 +419,15 @@ def upscale(
     output_path = (
         Path(output_file).expanduser().resolve()
         if output_file
-        else input_path.with_name(f"{input_path.stem}_1080p.mp4")
+        else input_path.with_name(
+            f"{input_path.stem}_{'enhanced_1080p' if engine == 'enhance' else '1080p'}.mp4"
+        )
     )
     tools = inspect_tools()
     width, height, duration, fps = probe_video(tools.ffprobe, input_path)
     if width and height:
         log(f"Input: {width}x{height}")
-        if width != 1280 or height != 720:
+        if engine == "ai" and (width != 1280 or height != 720):
             log("Warning: input is not exactly 1280x720. AI mode requires the original 720p file.")
     if duration:
         log(f"Duration: {duration:.1f}s")
@@ -400,8 +469,12 @@ def upscale(
             progress,
         )
     else:
-        cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite)
-        log("Running FFmpeg scaler:")
+        if engine == "enhance":
+            cmd = build_enhance_command(tools, input_path, output_path, codec, quality, overwrite)
+            log("Running FFmpeg enhance pass:")
+        else:
+            cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite)
+            log("Running FFmpeg scaler:")
         report_progress("Reassembling video", None, None, log, progress)
         return_code = stream_command(cmd, log)
     if return_code == 0:
@@ -710,7 +783,8 @@ def launch_gui() -> None:
     engine_frame = ttk.Frame(frame)
     engine_frame.grid(row=3, column=1, sticky="w", padx=8)
     ttk.Radiobutton(engine_frame, text="AI Real-ESRGAN", value="ai", variable=engine_var).pack(side="left")
-    ttk.Radiobutton(engine_frame, text="Fast FFmpeg scale", value="ffmpeg", variable=engine_var).pack(side="left", padx=16)
+    ttk.Radiobutton(engine_frame, text="Fast enhance", value="enhance", variable=engine_var).pack(side="left", padx=16)
+    ttk.Radiobutton(engine_frame, text="Fast scale", value="ffmpeg", variable=engine_var).pack(side="left")
 
     ttk.Label(frame, text="AI model").grid(row=4, column=0, sticky="w", pady=4)
     model_combo = ttk.Combobox(
@@ -749,7 +823,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upscale a video to 1080p using NVIDIA FFmpeg acceleration.")
     parser.add_argument("input", nargs="?", help="Input video path. Omit to launch the Tkinter UI.")
     parser.add_argument("-o", "--output", help="Output video path. Defaults to <input>_1080p.mp4.")
-    parser.add_argument("--engine", choices=["ai", "ffmpeg"], default="ai", help="Use AI Real-ESRGAN or fast FFmpeg scale.")
+    parser.add_argument(
+        "--engine",
+        choices=["ai", "enhance", "ffmpeg"],
+        default="ai",
+        help="Use AI Real-ESRGAN, fast FFmpeg enhance, or fast FFmpeg scale.",
+    )
     parser.add_argument(
         "--model",
         choices=["realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"],
@@ -775,6 +854,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ffprobe: {tools.ffprobe}")
         print(f"scale_cuda: {'yes' if tools.has_cuda_scale else 'no'}")
         print(f"scale_npp: {'yes' if tools.has_npp_scale else 'no'}")
+        print(f"cas: {'yes' if tools.has_cas else 'no'}")
+        print(f"deblock: {'yes' if tools.has_deblock else 'no'}")
+        print(f"hqdn3d: {'yes' if tools.has_hqdn3d else 'no'}")
         print(f"h264_nvenc: {'yes' if tools.has_h264_nvenc else 'no'}")
         print(f"hevc_nvenc: {'yes' if tools.has_hevc_nvenc else 'no'}")
         print(f"realesrgan: {tools.realesrgan or 'not found'}")
