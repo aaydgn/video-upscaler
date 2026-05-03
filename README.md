@@ -1,8 +1,8 @@
 # NVIDIA Video Upscaler
 
-Small Python/Tkinter wrapper for upscaling a 720p video to 1080p with an RTX GPU.
-By default it uses Real-ESRGAN AI frame upscaling, then FFmpeg/NVENC to rebuild
-the video. A fast FFmpeg-only scaler is also available.
+Small Python/Tkinter wrapper for improving soft 1080p video with FFmpeg/NVENC
+and optional Real-ESRGAN AI workflows. The default workflow is a fast 1080p
+enhancement pass.
 
 ## Requirements
 
@@ -58,26 +58,35 @@ From Command Prompt, or by double-clicking:
 run-ui.bat
 ```
 
-Choose the 720p input video, choose the output path, and click
-`Upscale to 1080p`.
+Choose the source video, choose a workflow, choose the output path, and click
+`Process to 1080p`.
 
 ## CLI
 
 ```powershell
-uv run python upscaler.py "C:\path\to\input_720p.mp4" --output "C:\path\to\output_1080p.mp4"
+uv run python upscaler.py "C:\path\to\input.mp4" --output "C:\path\to\output_1080p.mp4"
 ```
 
-That uses the AI pipeline. It expects the original `1280x720` input, extracts
-frames, upscales them 2x with Real-ESRGAN, saves the 2x AI master, then
-downscales that master to 1080p with copied audio. It should take meaningfully
-longer than a few seconds for anything except very short clips.
-The UI and CLI report AI progress using completed frame counts, so the main
-progress indicator will not reset when Real-ESRGAN's own percentage output does.
+That uses the default fast enhancement workflow. It keeps the final output at
+`1920x1080`, applies weak deblocking, light denoising, and CAS sharpening, then
+encodes with NVENC.
+
+For the old 720p AI workflow:
+
+```powershell
+uv run python upscaler.py input_720p.mp4 --engine ai
+```
+
+That expects the original `1280x720` input, extracts frames, upscales them 2x
+with Real-ESRGAN, saves the 2x AI master, then downscales that master to 1080p
+with copied audio. The UI and CLI report AI progress using completed frame
+counts, so the main progress indicator will not reset when Real-ESRGAN's own
+percentage output does.
 
 The batch launcher also forwards CLI arguments:
 
 ```bat
-run-ui.bat "C:\path\to\input_720p.mp4" --output "C:\path\to\output_1080p.mp4"
+run-ui.bat "C:\path\to\input.mp4" --output "C:\path\to\output_1080p.mp4"
 ```
 
 If Windows still has not picked up the PATH changes, run:
@@ -106,7 +115,7 @@ uv run python upscaler.py input.mp4 --engine ffmpeg
 ```
 
 For a source that is already 1080p but looks soft, try the fast enhancement
-pass first:
+workflow first:
 
 ```powershell
 uv run python upscaler.py input.mp4 --engine enhance
@@ -116,12 +125,16 @@ This keeps the final output at `1920x1080`, applies weak deblocking, light
 denoising, and CAS sharpening, then encodes with NVENC. It is much faster than
 AI 2x from a 1080p source.
 
-Enhancement can also be combined with another mode:
+The second 1080p workflow is AI re-detailing without going to 4K:
 
 ```powershell
-uv run python upscaler.py input_720p.mp4 --engine ai --enhance
-uv run python upscaler.py input.mp4 --engine ffmpeg --enhance
+uv run python upscaler.py input.mp4 --engine redetail
 ```
+
+That route expects a `1920x1080` source, denoises/deblocks while downscaling
+frames to `960x540`, runs Real-ESRGAN at 2x, and assembles a final
+`1920x1080` output. It is slower than fast enhancement but much cheaper than
+`1080p -> 4K AI -> 1080p`.
 
 For animation/anime content, try:
 
@@ -135,9 +148,8 @@ Lower `--quality` values produce larger, higher-quality files. The default is
 ## Notes
 
 - The target output is fixed at `1920x1080`.
-- AI mode saves both a 2x master, for example `<name>_2x.mp4`, and the final
+- 720p AI mode saves both a 2x master, for example `<name>_2x.mp4`, and the final
   `1920x1080` output.
-- AI mode uses conservative Real-ESRGAN tiling to avoid block/tile corruption.
+- AI modes use conservative Real-ESRGAN tiling to avoid block/tile corruption.
 - Audio and subtitles are copied when possible.
-- AI mode rejects non-`1280x720` input to avoid accidentally upscaling a previous
-  1080p/2x output again. Use `--engine ffmpeg` for simple resizing.
+- 720p AI mode expects `1280x720`; AI re-detail mode expects `1920x1080`.

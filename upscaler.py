@@ -24,6 +24,8 @@ from typing import Callable
 
 TARGET_WIDTH = 1920
 TARGET_HEIGHT = 1080
+REDETAIL_WIDTH = 960
+REDETAIL_HEIGHT = 540
 ProgressCallback = Callable[[str, int | None, int | None], None]
 
 
@@ -355,10 +357,20 @@ def build_video_filter(tools: ToolInfo, enhance: bool) -> str:
     return ",".join(filters)
 
 
+def build_redetail_extract_filter(tools: ToolInfo) -> str:
+    filters = []
+    if tools.has_deblock:
+        filters.append("deblock=filter=weak:block=8")
+    if tools.has_hqdn3d:
+        filters.append("hqdn3d=1.2:1.2:4:4")
+    filters.append(f"scale={REDETAIL_WIDTH}:{REDETAIL_HEIGHT}:flags=lanczos")
+    return ",".join(filters)
+
+
 def upscale(
     input_file: str,
     output_file: str | None = None,
-    engine: str = "ai",
+    engine: str = "enhance",
     model: str = "realesrgan-x4plus",
     codec: str = "h264",
     quality: int = 19,
@@ -377,7 +389,7 @@ def upscale(
         Path(output_file).expanduser().resolve()
         if output_file
         else input_path.with_name(
-            f"{input_path.stem}_{'enhanced_1080p' if apply_enhance and run_engine != 'ai' else '1080p'}.mp4"
+            f"{input_path.stem}_{'redetail_1080p' if run_engine == 'redetail' else 'enhanced_1080p' if apply_enhance and run_engine != 'ai' else '1080p'}.mp4"
         )
     )
     tools = inspect_tools()
@@ -386,6 +398,8 @@ def upscale(
         log(f"Input: {width}x{height}")
         if run_engine == "ai" and (width != 1280 or height != 720):
             log("Warning: input is not exactly 1280x720. AI mode requires the original 720p file.")
+        if run_engine == "redetail" and (width != TARGET_WIDTH or height != TARGET_HEIGHT):
+            log("Warning: AI re-detail mode expects a 1920x1080 source.")
     if duration:
         log(f"Duration: {duration:.1f}s")
 
@@ -426,6 +440,26 @@ def upscale(
             log,
             progress,
         )
+    elif run_engine == "redetail":
+        if width and height and (width != TARGET_WIDTH or height != TARGET_HEIGHT):
+            raise RuntimeError("AI re-detail mode expects the original 1920x1080 source.")
+        if not tools.realesrgan:
+            raise RuntimeError("Real-ESRGAN was not found. Install realesrgan-ncnn-vulkan or use --engine enhance.")
+        if not fps:
+            fps = 30.0
+            log("Warning: could not detect frame rate; using 30 fps.")
+        return_code = redetail_1080p_with_realesrgan(
+            tools,
+            input_path,
+            output_path,
+            model,
+            codec,
+            quality,
+            overwrite,
+            fps,
+            log,
+            progress,
+        )
     else:
         if apply_enhance:
             cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite, enhance=True)
@@ -441,6 +475,143 @@ def upscale(
     else:
         log(f"Upscale failed with exit code {return_code}")
     return return_code
+
+
+def redetail_1080p_with_realesrgan(
+    tools: ToolInfo,
+    input_path: Path,
+    output_path: Path,
+    model: str,
+    codec: str,
+    quality: int,
+    overwrite: bool,
+    fps: float,
+    log: Callable[[str], None],
+    progress: ProgressCallback | None,
+) -> int:
+    assert tools.realesrgan is not None
+    exe = Path(tools.realesrgan)
+    temp_path = output_path.parent / f"{output_path.stem}_work_{uuid.uuid4().hex[:8]}"
+    success = False
+    try:
+        temp_path.mkdir(parents=True, exist_ok=False)
+        frames_dir = temp_path / "frames_540p"
+        ai_dir = temp_path / "ai_frames_1080p"
+        frames_dir.mkdir()
+        ai_dir.mkdir()
+
+        log(
+            f"AI re-detail pipeline: {TARGET_WIDTH}x{TARGET_HEIGHT} source -> "
+            f"{REDETAIL_WIDTH}x{REDETAIL_HEIGHT} denoised frames -> "
+            f"{TARGET_WIDTH}x{TARGET_HEIGHT} AI output"
+        )
+        report_progress("Denoising and downscaling frames", None, None, log, progress)
+        extract_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            build_redetail_extract_filter(tools),
+            str(frames_dir / "frame_%08d.png"),
+        ]
+        code = stream_command(extract_cmd, log)
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+        total_frames = count_image_files(frames_dir)
+        if total_frames <= 0:
+            log(f"No extracted frames found. Work folder preserved for inspection: {temp_path}")
+            return 1
+        log(f"Extracted {total_frames} denoised/downscaled frames.")
+
+        log("Running Real-ESRGAN AI re-detailing at 2x.")
+        ai_cmd = [
+            str(exe),
+            "-i",
+            str(frames_dir),
+            "-o",
+            str(ai_dir),
+            "-n",
+            model,
+            "-s",
+            "2",
+            "-g",
+            "0",
+            "-t",
+            "512",
+            "-j",
+            "1:1:1",
+            "-f",
+            "png",
+        ]
+        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, cwd=str(exe.parent))
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+        processed_frames = count_image_files(ai_dir)
+        if processed_frames < total_frames:
+            log(f"Expected {total_frames} AI frames, found {processed_frames}.")
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return 1
+
+        if codec == "hevc" and tools.has_hevc_nvenc:
+            video_encoder = "hevc_nvenc"
+        elif tools.has_h264_nvenc:
+            video_encoder = "h264_nvenc"
+        else:
+            video_encoder = "libx264"
+
+        report_progress("Reassembling video", None, None, log, progress)
+        assemble_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-stats",
+            "-y" if overwrite else "-n",
+            "-framerate",
+            f"{fps:.6f}",
+            "-i",
+            str(ai_dir / "frame_%08d.png"),
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a?",
+            "-map",
+            "1:s?",
+            "-c:v",
+            video_encoder,
+            "-preset",
+            "p6" if video_encoder.endswith("_nvenc") else "slow",
+            "-cq",
+            str(quality),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        code = stream_command(assemble_cmd, log)
+        success = code == 0
+        if not success:
+            log(f"Work folder preserved for inspection: {temp_path}")
+        return code
+    finally:
+        if success:
+            try:
+                if temp_path.exists():
+                    shutil.rmtree(temp_path)
+            except OSError as exc:
+                log(f"Warning: could not remove work folder {temp_path}: {exc}")
 
 
 def upscale_with_realesrgan(
@@ -617,15 +788,13 @@ def launch_gui() -> None:
     from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    root.title("NVIDIA 720p to 1080p Upscaler")
+    root.title("NVIDIA Video Upscaler")
     root.geometry("760x520")
     root.minsize(680, 460)
 
     input_var = tk.StringVar()
     output_var = tk.StringVar()
-    ai_var = tk.BooleanVar(value=False)
-    enhance_var = tk.BooleanVar(value=True)
-    scale_var = tk.BooleanVar(value=False)
+    workflow_var = tk.StringVar(value="Fast enhance 1080p")
     model_var = tk.StringVar(value="realesrgan-x4plus")
     codec_var = tk.StringVar(value="h264")
     quality_var = tk.IntVar(value=19)
@@ -633,6 +802,12 @@ def launch_gui() -> None:
     progress_var = tk.DoubleVar(value=0.0)
     progress_text_var = tk.StringVar(value="Idle")
     messages = queue.Queue()
+    workflows = {
+        "Fast enhance 1080p": ("enhance", False),
+        "AI re-detail 1080p": ("redetail", False),
+        "720p AI upscale": ("ai", False),
+        "Fast scale": ("ffmpeg", False),
+    }
 
     class Tooltip:
         def __init__(self, widget: tk.Widget, text: str) -> None:
@@ -668,9 +843,23 @@ def launch_gui() -> None:
                 self.tip.destroy()
                 self.tip = None
 
+    def default_output_for(path: Path) -> Path:
+        workflow = workflow_var.get()
+        if workflow == "Fast enhance 1080p":
+            suffix = "enhanced_1080p"
+        elif workflow == "AI re-detail 1080p":
+            suffix = "redetail_1080p"
+        else:
+            suffix = "1080p"
+        return path.with_name(f"{path.stem}_{suffix}.mp4")
+
+    def update_default_output(_event: tk.Event | None = None) -> None:
+        if input_var.get():
+            output_var.set(str(default_output_for(Path(input_var.get()))))
+
     def choose_input() -> None:
         filename = filedialog.askopenfilename(
-            title="Choose 720p video",
+            title="Choose source video",
             filetypes=[
                 ("Video files", "*.mp4 *.mov *.mkv *.avi *.webm *.m4v"),
                 ("All files", "*.*"),
@@ -679,7 +868,7 @@ def launch_gui() -> None:
         if filename:
             input_var.set(filename)
             path = Path(filename)
-            output_var.set(str(path.with_name(f"{path.stem}_1080p.mp4")))
+            output_var.set(str(default_output_for(path)))
 
     def choose_output() -> None:
         filename = filedialog.asksaveasfilename(
@@ -725,12 +914,9 @@ def launch_gui() -> None:
 
     def start() -> None:
         if not input_var.get():
-            messagebox.showerror("Missing input", "Choose a 720p video first.")
+            messagebox.showerror("Missing input", "Choose a source video first.")
             return
-        if not ai_var.get() and not enhance_var.get() and not scale_var.get():
-            messagebox.showerror("Missing action", "Choose at least one processing option.")
-            return
-        selected_engine = "ai" if ai_var.get() else "enhance" if enhance_var.get() else "ffmpeg"
+        selected_engine, enhance_flag = workflows[workflow_var.get()]
         start_button.configure(state="disabled")
         progress_var.set(0.0)
         progress_text_var.set("Starting")
@@ -748,7 +934,7 @@ def launch_gui() -> None:
                     codec_var.get(),
                     quality_var.get(),
                     overwrite_var.get(),
-                    enhance_var.get(),
+                    enhance_flag,
                     messages.put,
                     queue_progress,
                 )
@@ -780,18 +966,22 @@ def launch_gui() -> None:
     ttk.Radiobutton(codec_frame, text="H.264 NVENC", value="h264", variable=codec_var).pack(side="left")
     ttk.Radiobutton(codec_frame, text="HEVC NVENC", value="hevc", variable=codec_var).pack(side="left", padx=16)
 
-    ttk.Label(frame, text="Processing").grid(row=3, column=0, sticky="w", pady=4)
-    engine_frame = ttk.Frame(frame)
-    engine_frame.grid(row=3, column=1, sticky="w", padx=8)
-    ai_check = ttk.Checkbutton(engine_frame, text="AI Real-ESRGAN", variable=ai_var)
-    enhance_check = ttk.Checkbutton(engine_frame, text="Fast enhance", variable=enhance_var)
-    scale_check = ttk.Checkbutton(engine_frame, text="Fast scale", variable=scale_var)
-    ai_check.pack(side="left")
-    enhance_check.pack(side="left", padx=16)
-    scale_check.pack(side="left")
-    Tooltip(ai_check, "Slow frame-by-frame AI pass. Saves a 2x master, then creates the final 1080p output.")
-    Tooltip(enhance_check, "Fast FFmpeg cleanup: weak deblock, light denoise, and CAS sharpening. Can be combined with AI.")
-    Tooltip(scale_check, "Fast FFmpeg resize to 1080p. Used when AI is off; AI already creates a final 1080p output.")
+    ttk.Label(frame, text="Workflow").grid(row=3, column=0, sticky="w", pady=4)
+    workflow_combo = ttk.Combobox(
+        frame,
+        textvariable=workflow_var,
+        values=tuple(workflows.keys()),
+        state="readonly",
+    )
+    workflow_combo.grid(row=3, column=1, sticky="ew", padx=8)
+    workflow_combo.bind("<<ComboboxSelected>>", update_default_output)
+    Tooltip(
+        workflow_combo,
+        "Fast enhance: 1080p cleanup only.\n"
+        "AI re-detail: 1080p -> denoised 540p frames -> Real-ESRGAN 2x -> 1080p.\n"
+        "720p AI upscale: original 720p -> 1440p AI master -> 1080p.\n"
+        "Fast scale: resize only.",
+    )
 
     ttk.Label(frame, text="AI model").grid(row=4, column=0, sticky="w", pady=4)
     model_combo = ttk.Combobox(
@@ -832,9 +1022,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("-o", "--output", help="Output video path. Defaults to <input>_1080p.mp4.")
     parser.add_argument(
         "--engine",
-        choices=["ai", "enhance", "ffmpeg"],
-        default="ai",
-        help="Use AI Real-ESRGAN, fast FFmpeg enhance, or fast FFmpeg scale.",
+        choices=["ai", "redetail", "enhance", "ffmpeg"],
+        default="enhance",
+        help="Use 720p AI, 1080p AI re-detail, fast FFmpeg enhance, or fast FFmpeg scale.",
     )
     parser.add_argument(
         "--model",
