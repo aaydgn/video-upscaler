@@ -207,6 +207,17 @@ def report_progress(
         log(f"{phase}...")
 
 
+def derive_2x_output_path(output_path: Path) -> Path:
+    if output_path.stem.endswith("_1080p"):
+        stem = output_path.stem[: -len("_1080p")] + "_2x"
+    else:
+        stem = output_path.stem + "_2x"
+    two_x_path = output_path.with_name(stem + output_path.suffix)
+    if two_x_path == output_path:
+        return output_path.with_name(output_path.stem + "_2x" + output_path.suffix)
+    return two_x_path
+
+
 def stream_command_with_frame_progress(
     args: list[str],
     log: Callable[[str], None],
@@ -348,7 +359,7 @@ def upscale(
     if width and height:
         log(f"Input: {width}x{height}")
         if width != 1280 or height != 720:
-            log("Warning: input is not exactly 1280x720; it will still be scaled to 1920x1080.")
+            log("Warning: input is not exactly 1280x720. AI mode requires the original 720p file.")
     if duration:
         log(f"Duration: {duration:.1f}s")
 
@@ -366,6 +377,11 @@ def upscale(
         )
     )
     if engine == "ai":
+        if width and height and (width != 1280 or height != 720):
+            raise RuntimeError(
+                "AI mode expects the original 1280x720 input. "
+                "Choose the original 720p file, not a previous 1080p/2x output."
+            )
         if not tools.realesrgan:
             raise RuntimeError("Real-ESRGAN was not found. Install realesrgan-ncnn-vulkan or use --engine ffmpeg.")
         if not fps:
@@ -451,6 +467,10 @@ def upscale_with_realesrgan(
             "2",
             "-g",
             "0",
+            "-t",
+            "512",
+            "-j",
+            "1:1:1",
             "-f",
             "png",
         ]
@@ -471,8 +491,10 @@ def upscale_with_realesrgan(
         else:
             video_encoder = "libx264"
 
-        report_progress("Reassembling video", None, None, log, progress)
-        assemble_cmd = [
+        two_x_output_path = derive_2x_output_path(output_path)
+        log(f"2x AI master output: {two_x_output_path}")
+        report_progress("Saving 2x AI video", None, None, log, progress)
+        assemble_2x_cmd = [
             tools.ffmpeg,
             "-hide_banner",
             "-stats",
@@ -489,8 +511,6 @@ def upscale_with_realesrgan(
             "1:a?",
             "-map",
             "1:s?",
-            "-vf",
-            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos",
             "-c:v",
             video_encoder,
             "-preset",
@@ -508,9 +528,44 @@ def upscale_with_realesrgan(
             "-shortest",
             "-movflags",
             "+faststart",
+            str(two_x_output_path),
+        ]
+        code = stream_command(assemble_2x_cmd, log)
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+
+        report_progress("Downscaling to 1080p", None, None, log, progress)
+        downscale_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-stats",
+            "-y" if overwrite else "-n",
+            "-i",
+            str(two_x_output_path),
+            "-map",
+            "0",
+            "-vf",
+            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos",
+            "-c:v",
+            video_encoder,
+            "-preset",
+            "p6" if video_encoder.endswith("_nvenc") else "slow",
+            "-cq",
+            str(quality),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-movflags",
+            "+faststart",
             str(output_path),
         ]
-        code = stream_command(assemble_cmd, log)
+        code = stream_command(downscale_cmd, log)
         success = code == 0
         if not success:
             log(f"Work folder preserved for inspection: {temp_path}")
@@ -727,7 +782,11 @@ def main(argv: list[str] | None = None) -> int:
     if not args.input:
         launch_gui()
         return 0
-    return upscale(args.input, args.output, args.engine, args.model, args.codec, args.quality, args.overwrite)
+    try:
+        return upscale(args.input, args.output, args.engine, args.model, args.codec, args.quality, args.overwrite)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

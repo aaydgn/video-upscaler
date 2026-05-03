@@ -65,9 +65,10 @@ Choose the 720p input video, choose the output path, and click
 uv run python upscaler.py "C:\path\to\input_720p.mp4" --output "C:\path\to\output_1080p.mp4"
 ```
 
-That uses the AI pipeline. It extracts frames, upscales them with Real-ESRGAN,
-then reassembles the video with copied audio. It should take meaningfully longer
-than a few seconds for anything except very short clips.
+That uses the AI pipeline. It expects the original `1280x720` input, extracts
+frames, upscales them 2x with Real-ESRGAN, saves the 2x AI master, then
+downscales that master to 1080p with copied audio. It should take meaningfully
+longer than a few seconds for anything except very short clips.
 The UI and CLI report AI progress using completed frame counts, so the main
 progress indicator will not reset when Real-ESRGAN's own percentage output does.
 
@@ -114,7 +115,9 @@ Lower `--quality` values produce larger, higher-quality files. The default is
 ## Notes
 
 - The target output is fixed at `1920x1080`.
-- AI mode upscales frames 2x first, then downsamples to 1080p.
+- AI mode saves both a 2x master, for example `<name>_2x.mp4`, and the final
+  `1920x1080` output.
+- AI mode uses conservative Real-ESRGAN tiling to avoid block/tile corruption.
 - Audio and subtitles are copied when possible.
-- If the input is not exactly `1280x720`, the script warns and still scales to
-  1080p.
+- AI mode rejects non-`1280x720` input to avoid accidentally upscaling a previous
+  1080p/2x output again. Use `--engine ffmpeg` for simple resizing.
