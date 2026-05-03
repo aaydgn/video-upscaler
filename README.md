@@ -116,6 +116,13 @@ This keeps the final output at `1920x1080`, applies weak deblocking, light
 denoising, and CAS sharpening, then encodes with NVENC. It is much faster than
 AI 2x from a 1080p source.
 
+Enhancement can also be combined with another mode:
+
+```powershell
+uv run python upscaler.py input_720p.mp4 --engine ai --enhance
+uv run python upscaler.py input.mp4 --engine ffmpeg --enhance
+```
+
 For animation/anime content, try:
 
 ```powershell

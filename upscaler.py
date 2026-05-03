@@ -286,6 +286,7 @@ def build_ffmpeg_command(
     codec: str,
     quality: int,
     overwrite: bool,
+    enhance: bool = False,
 ) -> list[str]:
     if codec == "hevc" and tools.has_hevc_nvenc:
         video_encoder = "hevc_nvenc"
@@ -296,14 +297,14 @@ def build_ffmpeg_command(
     else:
         raise RuntimeError("This FFmpeg build does not expose h264_nvenc or hevc_nvenc.")
 
-    if tools.has_cuda_scale:
+    if tools.has_cuda_scale and not enhance:
         scale_filter = f"scale_cuda=w={TARGET_WIDTH}:h={TARGET_HEIGHT}:interp_algo=lanczos"
         hw_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    elif tools.has_npp_scale:
+    elif tools.has_npp_scale and not enhance:
         scale_filter = f"scale_npp={TARGET_WIDTH}:{TARGET_HEIGHT}:interp_algo=lanczos"
         hw_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     else:
-        scale_filter = f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos"
+        scale_filter = build_video_filter(tools, enhance)
         hw_args = []
 
     preset = "p6"
@@ -340,65 +341,18 @@ def build_ffmpeg_command(
     return cmd
 
 
-def build_enhance_command(
-    tools: ToolInfo,
-    input_path: Path,
-    output_path: Path,
-    codec: str,
-    quality: int,
-    overwrite: bool,
-) -> list[str]:
-    if codec == "hevc" and tools.has_hevc_nvenc:
-        video_encoder = "hevc_nvenc"
-    elif tools.has_h264_nvenc:
-        video_encoder = "h264_nvenc"
-    elif tools.has_hevc_nvenc:
-        video_encoder = "hevc_nvenc"
-    else:
-        raise RuntimeError("This FFmpeg build does not expose h264_nvenc or hevc_nvenc.")
-
+def build_video_filter(tools: ToolInfo, enhance: bool) -> str:
     filters = []
-    if tools.has_deblock:
+    if enhance and tools.has_deblock:
         filters.append("deblock=filter=weak:block=8")
-    if tools.has_hqdn3d:
+    if enhance and tools.has_hqdn3d:
         filters.append("hqdn3d=1.2:1.2:4:4")
-    if tools.has_cas:
-        filters.append("cas=strength=0.45")
-    else:
-        filters.append("unsharp=5:5:0.45:3:3:0.15")
     filters.append(f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos")
-
-    return [
-        tools.ffmpeg,
-        "-hide_banner",
-        "-stats",
-        "-y" if overwrite else "-n",
-        "-i",
-        str(input_path),
-        "-map",
-        "0",
-        "-vf",
-        ",".join(filters),
-        "-c:v",
-        video_encoder,
-        "-preset",
-        "p6",
-        "-rc",
-        "vbr",
-        "-cq",
-        str(quality),
-        "-b:v",
-        "0",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "copy",
-        "-c:s",
-        "copy",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
+    if enhance and tools.has_cas:
+        filters.append("cas=strength=0.45")
+    elif enhance:
+        filters.append("unsharp=5:5:0.45:3:3:0.15")
+    return ",".join(filters)
 
 
 def upscale(
@@ -409,9 +363,12 @@ def upscale(
     codec: str = "h264",
     quality: int = 19,
     overwrite: bool = False,
+    enhance: bool = False,
     log: Callable[[str], None] = print,
     progress: ProgressCallback | None = None,
 ) -> int:
+    apply_enhance = enhance or engine == "enhance"
+    run_engine = "ffmpeg" if engine == "enhance" else engine
     input_path = Path(input_file).expanduser().resolve()
     if not input_path.exists():
         raise FileNotFoundError(f"Input video does not exist: {input_path}")
@@ -420,14 +377,14 @@ def upscale(
         Path(output_file).expanduser().resolve()
         if output_file
         else input_path.with_name(
-            f"{input_path.stem}_{'enhanced_1080p' if engine == 'enhance' else '1080p'}.mp4"
+            f"{input_path.stem}_{'enhanced_1080p' if apply_enhance and run_engine != 'ai' else '1080p'}.mp4"
         )
     )
     tools = inspect_tools()
     width, height, duration, fps = probe_video(tools.ffprobe, input_path)
     if width and height:
         log(f"Input: {width}x{height}")
-        if engine == "ai" and (width != 1280 or height != 720):
+        if run_engine == "ai" and (width != 1280 or height != 720):
             log("Warning: input is not exactly 1280x720. AI mode requires the original 720p file.")
     if duration:
         log(f"Duration: {duration:.1f}s")
@@ -445,7 +402,7 @@ def upscale(
             else "CPU scale with NVENC encode"
         )
     )
-    if engine == "ai":
+    if run_engine == "ai":
         if width and height and (width != 1280 or height != 720):
             raise RuntimeError(
                 "AI mode expects the original 1280x720 input. "
@@ -464,13 +421,14 @@ def upscale(
             codec,
             quality,
             overwrite,
+            apply_enhance,
             fps,
             log,
             progress,
         )
     else:
-        if engine == "enhance":
-            cmd = build_enhance_command(tools, input_path, output_path, codec, quality, overwrite)
+        if apply_enhance:
+            cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite, enhance=True)
             log("Running FFmpeg enhance pass:")
         else:
             cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite)
@@ -493,6 +451,7 @@ def upscale_with_realesrgan(
     codec: str,
     quality: int,
     overwrite: bool,
+    enhance: bool,
     fps: float,
     log: Callable[[str], None],
     progress: ProgressCallback | None,
@@ -609,6 +568,7 @@ def upscale_with_realesrgan(
             return code
 
         report_progress("Downscaling to 1080p", None, None, log, progress)
+        final_filter = build_video_filter(tools, enhance)
         downscale_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -619,7 +579,7 @@ def upscale_with_realesrgan(
             "-map",
             "0",
             "-vf",
-            f"scale={TARGET_WIDTH}:{TARGET_HEIGHT}:flags=lanczos",
+            final_filter,
             "-c:v",
             video_encoder,
             "-preset",
@@ -663,7 +623,9 @@ def launch_gui() -> None:
 
     input_var = tk.StringVar()
     output_var = tk.StringVar()
-    engine_var = tk.StringVar(value="ai")
+    ai_var = tk.BooleanVar(value=True)
+    enhance_var = tk.BooleanVar(value=False)
+    scale_var = tk.BooleanVar(value=False)
     model_var = tk.StringVar(value="realesrgan-x4plus")
     codec_var = tk.StringVar(value="h264")
     quality_var = tk.IntVar(value=19)
@@ -671,6 +633,40 @@ def launch_gui() -> None:
     progress_var = tk.DoubleVar(value=0.0)
     progress_text_var = tk.StringVar(value="Idle")
     messages = queue.Queue()
+
+    class Tooltip:
+        def __init__(self, widget: tk.Widget, text: str) -> None:
+            self.widget = widget
+            self.text = text
+            self.tip: tk.Toplevel | None = None
+            widget.bind("<Enter>", self.show)
+            widget.bind("<Leave>", self.hide)
+
+        def show(self, _event: tk.Event) -> None:
+            if self.tip:
+                return
+            x = self.widget.winfo_rootx() + 18
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+            self.tip = tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_geometry(f"+{x}+{y}")
+            label = tk.Label(
+                self.tip,
+                text=self.text,
+                justify="left",
+                background="#ffffe0",
+                relief="solid",
+                borderwidth=1,
+                padx=8,
+                pady=5,
+                wraplength=340,
+            )
+            label.pack()
+
+        def hide(self, _event: tk.Event) -> None:
+            if self.tip:
+                self.tip.destroy()
+                self.tip = None
 
     def choose_input() -> None:
         filename = filedialog.askopenfilename(
@@ -731,6 +727,10 @@ def launch_gui() -> None:
         if not input_var.get():
             messagebox.showerror("Missing input", "Choose a 720p video first.")
             return
+        if not ai_var.get() and not enhance_var.get() and not scale_var.get():
+            messagebox.showerror("Missing action", "Choose at least one processing option.")
+            return
+        selected_engine = "ai" if ai_var.get() else "enhance" if enhance_var.get() else "ffmpeg"
         start_button.configure(state="disabled")
         progress_var.set(0.0)
         progress_text_var.set("Starting")
@@ -743,11 +743,12 @@ def launch_gui() -> None:
                 code = upscale(
                     input_var.get(),
                     output_var.get() or None,
-                    engine_var.get(),
+                    selected_engine,
                     model_var.get(),
                     codec_var.get(),
                     quality_var.get(),
                     overwrite_var.get(),
+                    enhance_var.get(),
                     messages.put,
                     queue_progress,
                 )
@@ -779,12 +780,18 @@ def launch_gui() -> None:
     ttk.Radiobutton(codec_frame, text="H.264 NVENC", value="h264", variable=codec_var).pack(side="left")
     ttk.Radiobutton(codec_frame, text="HEVC NVENC", value="hevc", variable=codec_var).pack(side="left", padx=16)
 
-    ttk.Label(frame, text="Engine").grid(row=3, column=0, sticky="w", pady=4)
+    ttk.Label(frame, text="Processing").grid(row=3, column=0, sticky="w", pady=4)
     engine_frame = ttk.Frame(frame)
     engine_frame.grid(row=3, column=1, sticky="w", padx=8)
-    ttk.Radiobutton(engine_frame, text="AI Real-ESRGAN", value="ai", variable=engine_var).pack(side="left")
-    ttk.Radiobutton(engine_frame, text="Fast enhance", value="enhance", variable=engine_var).pack(side="left", padx=16)
-    ttk.Radiobutton(engine_frame, text="Fast scale", value="ffmpeg", variable=engine_var).pack(side="left")
+    ai_check = ttk.Checkbutton(engine_frame, text="AI Real-ESRGAN", variable=ai_var)
+    enhance_check = ttk.Checkbutton(engine_frame, text="Fast enhance", variable=enhance_var)
+    scale_check = ttk.Checkbutton(engine_frame, text="Fast scale", variable=scale_var)
+    ai_check.pack(side="left")
+    enhance_check.pack(side="left", padx=16)
+    scale_check.pack(side="left")
+    Tooltip(ai_check, "Slow frame-by-frame AI pass. Saves a 2x master, then creates the final 1080p output.")
+    Tooltip(enhance_check, "Fast FFmpeg cleanup: weak deblock, light denoise, and CAS sharpening. Can be combined with AI.")
+    Tooltip(scale_check, "Fast FFmpeg resize to 1080p. Used when AI is off; AI already creates a final 1080p output.")
 
     ttk.Label(frame, text="AI model").grid(row=4, column=0, sticky="w", pady=4)
     model_combo = ttk.Combobox(
@@ -805,7 +812,7 @@ def launch_gui() -> None:
         row=6, column=1, sticky="w", padx=8, pady=4
     )
 
-    start_button = ttk.Button(frame, text="Upscale to 1080p", command=start)
+    start_button = ttk.Button(frame, text="Process to 1080p", command=start)
     start_button.grid(row=7, column=1, sticky="w", padx=8, pady=10)
 
     progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, mode="determinate")
@@ -837,6 +844,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="NVENC codec to use.")
     parser.add_argument("--quality", type=int, default=19, help="NVENC CQ value, lower is larger/better. Default: 19.")
+    parser.add_argument("--enhance", action="store_true", help="Add the fast deblock/denoise/CAS enhancement pass.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output file if it exists.")
     parser.add_argument("--check", action="store_true", help="Check FFmpeg/NVIDIA capabilities and exit.")
     return parser.parse_args(argv)
@@ -865,7 +873,16 @@ def main(argv: list[str] | None = None) -> int:
         launch_gui()
         return 0
     try:
-        return upscale(args.input, args.output, args.engine, args.model, args.codec, args.quality, args.overwrite)
+        return upscale(
+            args.input,
+            args.output,
+            args.engine,
+            args.model,
+            args.codec,
+            args.quality,
+            args.overwrite,
+            args.enhance,
+        )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
