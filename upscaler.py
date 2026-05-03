@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,7 @@ from typing import Callable
 
 TARGET_WIDTH = 1920
 TARGET_HEIGHT = 1080
+ProgressCallback = Callable[[str, int | None, int | None], None]
 
 
 @dataclass(frozen=True)
@@ -178,6 +180,88 @@ def stream_command(args: list[str], log: Callable[[str], None], cwd: str | None 
     return process.wait()
 
 
+def count_image_files(directory: Path) -> int:
+    try:
+        return sum(
+            1
+            for entry in os.scandir(directory)
+            if entry.is_file() and entry.name.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+        )
+    except OSError:
+        return 0
+
+
+def report_progress(
+    phase: str,
+    current: int | None,
+    total: int | None,
+    log: Callable[[str], None],
+    progress: ProgressCallback | None,
+) -> None:
+    if progress:
+        progress(phase, current, total)
+    if current is not None and total:
+        percent = min(100.0, (current / total) * 100)
+        log(f"{phase}: {current} / {total} frames ({percent:.1f}%)")
+    else:
+        log(f"{phase}...")
+
+
+def stream_command_with_frame_progress(
+    args: list[str],
+    log: Callable[[str], None],
+    output_dir: Path,
+    total_frames: int,
+    progress: ProgressCallback | None,
+    cwd: str | None = None,
+) -> int:
+    log(subprocess.list2cmdline(args))
+    stop_event = threading.Event()
+    lock = threading.Lock()
+    last_reported = {"count": -1, "time": 0.0}
+
+    def emit(force: bool = False) -> None:
+        current = count_image_files(output_dir)
+        now = time.monotonic()
+        with lock:
+            changed = current != last_reported["count"]
+            due = now - last_reported["time"] >= 2.0
+            if force and not changed and last_reported["count"] != -1:
+                return
+            if not force and not (changed and (due or current == total_frames)):
+                return
+            last_reported["count"] = current
+            last_reported["time"] = now
+        report_progress("AI upscaling frames", current, total_frames, log, progress)
+
+    def monitor() -> None:
+        emit(force=True)
+        while not stop_event.wait(1.0):
+            emit()
+        emit(force=True)
+
+    monitor_thread = threading.Thread(target=monitor, daemon=True)
+    monitor_thread.start()
+    process = subprocess.Popen(
+        args,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert process.stdout is not None
+    for line in process.stdout:
+        text = line.rstrip()
+        if text:
+            log(f"[Real-ESRGAN] {text}")
+    return_code = process.wait()
+    stop_event.set()
+    monitor_thread.join(timeout=5)
+    return return_code
+
+
 def build_ffmpeg_command(
     tools: ToolInfo,
     input_path: Path,
@@ -248,6 +332,7 @@ def upscale(
     quality: int = 19,
     overwrite: bool = False,
     log: Callable[[str], None] = print,
+    progress: ProgressCallback | None = None,
 ) -> int:
     input_path = Path(input_file).expanduser().resolve()
     if not input_path.exists():
@@ -286,15 +371,28 @@ def upscale(
         if not fps:
             fps = 30.0
             log("Warning: could not detect frame rate; using 30 fps.")
-        return_code = upscale_with_realesrgan(tools, input_path, output_path, model, codec, quality, overwrite, fps, log)
+        return_code = upscale_with_realesrgan(
+            tools,
+            input_path,
+            output_path,
+            model,
+            codec,
+            quality,
+            overwrite,
+            fps,
+            log,
+            progress,
+        )
     else:
         cmd = build_ffmpeg_command(tools, input_path, output_path, codec, quality, overwrite)
         log("Running FFmpeg scaler:")
+        report_progress("Reassembling video", None, None, log, progress)
         return_code = stream_command(cmd, log)
     if return_code == 0:
+        report_progress("Done", None, None, log, progress)
         log(f"Done: {output_path}")
     else:
-        log(f"FFmpeg failed with exit code {return_code}")
+        log(f"Upscale failed with exit code {return_code}")
     return return_code
 
 
@@ -308,10 +406,12 @@ def upscale_with_realesrgan(
     overwrite: bool,
     fps: float,
     log: Callable[[str], None],
+    progress: ProgressCallback | None,
 ) -> int:
     assert tools.realesrgan is not None
     exe = Path(tools.realesrgan)
     temp_path = output_path.parent / f"{output_path.stem}_work_{uuid.uuid4().hex[:8]}"
+    success = False
     try:
         temp_path.mkdir(parents=True, exist_ok=False)
         frames_dir = temp_path / "frames"
@@ -319,7 +419,7 @@ def upscale_with_realesrgan(
         frames_dir.mkdir()
         ai_dir.mkdir()
 
-        log("Extracting frames...")
+        report_progress("Extracting frames", None, None, log, progress)
         extract_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -330,7 +430,13 @@ def upscale_with_realesrgan(
         ]
         code = stream_command(extract_cmd, log)
         if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
             return code
+        total_frames = count_image_files(frames_dir)
+        if total_frames <= 0:
+            log(f"No extracted frames found. Work folder preserved for inspection: {temp_path}")
+            return 1
+        log(f"Extracted {total_frames} frames.")
 
         log("Running Real-ESRGAN AI upscaling. This should take much longer than a few seconds.")
         ai_cmd = [
@@ -348,9 +454,15 @@ def upscale_with_realesrgan(
             "-f",
             "png",
         ]
-        code = stream_command(ai_cmd, log, cwd=str(exe.parent))
+        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, cwd=str(exe.parent))
         if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
             return code
+        processed_frames = count_image_files(ai_dir)
+        if processed_frames < total_frames:
+            log(f"Expected {total_frames} upscaled frames, found {processed_frames}.")
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return 1
 
         if codec == "hevc" and tools.has_hevc_nvenc:
             video_encoder = "hevc_nvenc"
@@ -359,7 +471,7 @@ def upscale_with_realesrgan(
         else:
             video_encoder = "libx264"
 
-        log("Reassembling video and copying audio...")
+        report_progress("Reassembling video", None, None, log, progress)
         assemble_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -398,13 +510,18 @@ def upscale_with_realesrgan(
             "+faststart",
             str(output_path),
         ]
-        return stream_command(assemble_cmd, log)
+        code = stream_command(assemble_cmd, log)
+        success = code == 0
+        if not success:
+            log(f"Work folder preserved for inspection: {temp_path}")
+        return code
     finally:
-        try:
-            if temp_path.exists():
-                shutil.rmtree(temp_path)
-        except OSError as exc:
-            log(f"Warning: could not remove work folder {temp_path}: {exc}")
+        if success:
+            try:
+                if temp_path.exists():
+                    shutil.rmtree(temp_path)
+            except OSError as exc:
+                log(f"Warning: could not remove work folder {temp_path}: {exc}")
 
 
 def launch_gui() -> None:
@@ -423,7 +540,9 @@ def launch_gui() -> None:
     codec_var = tk.StringVar(value="h264")
     quality_var = tk.IntVar(value=19)
     overwrite_var = tk.BooleanVar(value=False)
-    messages: queue.Queue[str] = queue.Queue()
+    progress_var = tk.DoubleVar(value=0.0)
+    progress_text_var = tk.StringVar(value="Idle")
+    messages = queue.Queue()
 
     def choose_input() -> None:
         filename = filedialog.askopenfilename(
@@ -453,10 +572,29 @@ def launch_gui() -> None:
         log_box.see("end")
         log_box.configure(state="disabled")
 
+    def queue_progress(phase: str, current: int | None, total: int | None) -> None:
+        messages.put(("progress", phase, current, total))
+
+    def apply_progress(phase: str, current: int | None, total: int | None) -> None:
+        if current is not None and total:
+            percent = min(100.0, (current / total) * 100)
+            progress_var.set(percent)
+            progress_text_var.set(f"{phase}: {current} / {total} frames ({percent:.1f}%)")
+        elif phase == "Done":
+            progress_var.set(100.0)
+            progress_text_var.set("Done")
+        else:
+            progress_text_var.set(phase)
+
     def drain_messages() -> None:
         try:
             while True:
-                append_log(messages.get_nowait())
+                item = messages.get_nowait()
+                if isinstance(item, tuple) and item and item[0] == "progress":
+                    _, phase, current, total = item
+                    apply_progress(phase, current, total)
+                else:
+                    append_log(str(item))
         except queue.Empty:
             pass
         root.after(100, drain_messages)
@@ -466,6 +604,8 @@ def launch_gui() -> None:
             messagebox.showerror("Missing input", "Choose a 720p video first.")
             return
         start_button.configure(state="disabled")
+        progress_var.set(0.0)
+        progress_text_var.set("Starting")
         log_box.configure(state="normal")
         log_box.delete("1.0", "end")
         log_box.configure(state="disabled")
@@ -481,6 +621,7 @@ def launch_gui() -> None:
                     quality_var.get(),
                     overwrite_var.get(),
                     messages.put,
+                    queue_progress,
                 )
                 if code != 0:
                     messages.put("Upscale failed. Check the FFmpeg log above.")
@@ -494,7 +635,7 @@ def launch_gui() -> None:
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(8, weight=1)
+    frame.rowconfigure(10, weight=1)
 
     ttk.Label(frame, text="Input video").grid(row=0, column=0, sticky="w", pady=4)
     ttk.Entry(frame, textvariable=input_var).grid(row=0, column=1, sticky="ew", padx=8)
@@ -538,8 +679,12 @@ def launch_gui() -> None:
     start_button = ttk.Button(frame, text="Upscale to 1080p", command=start)
     start_button.grid(row=7, column=1, sticky="w", padx=8, pady=10)
 
+    progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, mode="determinate")
+    progress_bar.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+    ttk.Label(frame, textvariable=progress_text_var).grid(row=9, column=0, columnspan=3, sticky="w")
+
     log_box = tk.Text(frame, height=14, state="disabled", wrap="word")
-    log_box.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+    log_box.grid(row=10, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
 
     drain_messages()
     root.mainloop()

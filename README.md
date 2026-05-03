@@ -68,6 +68,8 @@ uv run python upscaler.py "C:\path\to\input_720p.mp4" --output "C:\path\to\outpu
 That uses the AI pipeline. It extracts frames, upscales them with Real-ESRGAN,
 then reassembles the video with copied audio. It should take meaningfully longer
 than a few seconds for anything except very short clips.
+The UI and CLI report AI progress using completed frame counts, so the main
+progress indicator will not reset when Real-ESRGAN's own percentage output does.
 
 The batch launcher also forwards CLI arguments:
 
