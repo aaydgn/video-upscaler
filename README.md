@@ -10,14 +10,6 @@ NVENC for the final encode.
 - `uv`
 - FFmpeg with NVENC support on `PATH`
 
-This machine has been configured with:
-
-- `uv`: `C:\Users\user\.local\bin`
-- FFmpeg: `C:\Tools\ffmpeg\bin`
-- GPU: NVIDIA GeForce RTX 5060 Ti
-
-Both tool folders were added to the persistent user PATH.
-
 ## Install
 
 Install `uv`:
@@ -30,7 +22,7 @@ If this is your current PowerShell session immediately after installing `uv`,
 run:
 
 ```powershell
-$env:Path = "C:\Users\user\.local\bin;$env:Path"
+$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
 ```
 
 Install FFmpeg with NVIDIA encoder support and add its `bin` directory to PATH
@@ -47,9 +39,8 @@ After installation, restart PowerShell and check:
 uv run python upscaler.py --check
 ```
 
-On this machine the check reports `scale_cuda: yes`, `h264_nvenc: yes`, and
-`hevc_nvenc: yes`. `scale_cuda` or `scale_npp` is ideal, but the script can
-still use NVENC encoding if only CPU scaling is available.
+You should see `h264_nvenc: yes`. `scale_cuda` or `scale_npp` is ideal, but the
+script can still use NVENC encoding if only CPU scaling is available.
 
 ## UI
 
