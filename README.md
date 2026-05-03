@@ -48,6 +48,12 @@ script can still use NVENC encoding if only CPU scaling is available.
 .\run-ui.ps1
 ```
 
+From Command Prompt, or by double-clicking:
+
+```bat
+run-ui.bat
+```
+
 Choose the 720p input video, choose the output path, and click
 `Upscale to 1080p`.
 
@@ -57,10 +63,23 @@ Choose the 720p input video, choose the output path, and click
 uv run python upscaler.py "C:\path\to\input_720p.mp4" --output "C:\path\to\output_1080p.mp4"
 ```
 
+The batch launcher also forwards CLI arguments:
+
+```bat
+run-ui.bat "C:\path\to\input_720p.mp4" --output "C:\path\to\output_1080p.mp4"
+```
+
 If Windows still has not picked up the PATH changes, run:
 
 ```powershell
 .\setup-path.ps1
+```
+
+To add `uv` and FFmpeg to the system PATH for all users, open PowerShell as
+Administrator and run:
+
+```powershell
+.\setup-system-path.ps1
 ```
 
 Useful options:
