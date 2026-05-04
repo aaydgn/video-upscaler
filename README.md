@@ -10,6 +10,7 @@ enhancement pass.
 - `uv`
 - FFmpeg with NVENC support on `PATH`
 - Real-ESRGAN ncnn Vulkan, optional but required for AI upscaling
+- RIFE ncnn Vulkan, optional but required for 60 fps interpolation
 
 ## Install
 
@@ -43,8 +44,23 @@ uv run python upscaler.py --check
 You should see `h264_nvenc: yes`. `scale_cuda` or `scale_npp` is ideal, but the
 script can still use NVENC encoding if only CPU scaling is available.
 For AI upscaling, `realesrgan` should show a path instead of `not found`.
+For interpolation, `rife` should show a path instead of `not found`.
 For the fast enhancement mode, `cas`, `deblock`, and `hqdn3d` should ideally
 show `yes`.
+
+Install RIFE for GPU frame interpolation from:
+
+```text
+https://github.com/nihui/rife-ncnn-vulkan/releases
+```
+
+Extract the Windows zip to:
+
+```text
+C:\Tools\rife-ncnn-vulkan
+```
+
+Then run `.\setup-path.ps1` or add that folder to PATH.
 
 ## UI
 
@@ -59,7 +75,7 @@ run-ui.bat
 ```
 
 Choose the source video, choose a workflow, choose the output path, and click
-`Process to 1080p`.
+`Process video`.
 
 ## CLI
 
@@ -70,6 +86,13 @@ uv run python upscaler.py "C:\path\to\input.mp4" --output "C:\path\to\output_108
 That uses the default fast enhancement workflow. It keeps the final output at
 `1920x1080`, applies weak deblocking, light denoising, and CAS sharpening, then
 encodes with NVENC.
+
+To interpolate an existing rendered video to exact `60 fps` without changing its
+resolution:
+
+```powershell
+uv run python upscaler.py input.mp4 --engine interp60
+```
 
 For the old 720p AI workflow:
 
@@ -114,6 +137,17 @@ Use the old fast scaler when you only want a resize:
 uv run python upscaler.py input.mp4 --engine ffmpeg
 ```
 
+To add final-stage interpolation to any workflow:
+
+```powershell
+uv run python upscaler.py input.mp4 --interp60
+uv run python upscaler.py input.mp4 --engine ai4k --interp60
+```
+
+Interpolation uses `rife-ncnn-vulkan` on the GPU and targets exact `60 fps`.
+Inputs already at `60 fps` are copied or passed through cleanly. Inputs above
+`60 fps` fail with a clear error instead of trying to interpolate downward.
+
 For a source that is already 1080p but looks soft, try the fast enhancement
 workflow first:
 
@@ -136,6 +170,17 @@ frames to `960x540`, runs Real-ESRGAN at 2x, and assembles a final
 `1920x1080` output. It is slower than fast enhancement but much cheaper than
 `1080p -> 4K AI -> 1080p`.
 
+For full 1080p to 4K AI upscaling:
+
+```powershell
+uv run python upscaler.py input.mp4 --engine ai4k
+```
+
+That route expects a `1920x1080` source and saves a `3840x2160` output.
+The 2x AI workflows use `realesr-animevideov3` because the installed
+Real-ESRGAN build crops/breaks frames when the x4 models are forced through
+`-s 2`.
+
 For animation/anime content, try:
 
 ```powershell
@@ -148,8 +193,12 @@ Lower `--quality` values produce larger, higher-quality files. The default is
 ## Notes
 
 - The target output is fixed at `1920x1080`.
+- Standalone interpolation preserves the input resolution and converts only the
+  frame rate.
 - 720p AI mode saves both a 2x master, for example `<name>_2x.mp4`, and the final
   `1920x1080` output.
 - AI modes use conservative Real-ESRGAN tiling to avoid block/tile corruption.
+- 60 fps interpolation uses RIFE on the GPU. It is still frame-heavy at 4K, but
+  avoids FFmpeg's slow CPU `minterpolate` path.
 - Audio and subtitles are copied when possible.
 - 720p AI mode expects `1280x720`; AI re-detail mode expects `1920x1080`.

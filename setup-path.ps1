@@ -2,7 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $pathsToAdd = @(
     "$env:USERPROFILE\.local\bin",
-    "C:\Tools\ffmpeg\bin"
+    "C:\Tools\ffmpeg\bin",
+    "C:\Tools\rife-ncnn-vulkan"
 )
 
 $current = [Environment]::GetEnvironmentVariable("Path", "User")

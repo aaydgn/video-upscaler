@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $uvSource = Join-Path $env:USERPROFILE ".local\bin"
 $uvTarget = "C:\Tools\uv\bin"
 $ffmpegBin = "C:\Tools\ffmpeg\bin"
+$rifeBin = "C:\Tools\rife-ncnn-vulkan"
 
 New-Item -ItemType Directory -Force -Path $uvTarget | Out-Null
 
@@ -22,7 +23,11 @@ foreach ($required in @((Join-Path $uvTarget "uv.exe"), (Join-Path $ffmpegBin "f
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 $parts = @($machinePath -split ";" | Where-Object { $_ })
 
-foreach ($path in @($uvTarget, $ffmpegBin)) {
+foreach ($path in @($uvTarget, $ffmpegBin, $rifeBin)) {
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Host "Skipping missing PATH entry: $path"
+        continue
+    }
     if (-not ($parts | Where-Object { $_.TrimEnd("\") -ieq $path.TrimEnd("\") })) {
         $parts += $path
     }
@@ -33,4 +38,7 @@ foreach ($path in @($uvTarget, $ffmpegBin)) {
 Write-Host "Added to system PATH:"
 Write-Host "  $uvTarget"
 Write-Host "  $ffmpegBin"
+if (Test-Path -LiteralPath $rifeBin) {
+    Write-Host "  $rifeBin"
+}
 Write-Host "Open a new terminal before relying on the updated system PATH."
