@@ -30,8 +30,12 @@ REDETAIL_WIDTH = 960
 REDETAIL_HEIGHT = 540
 AI_2X_MODEL = "realesr-animevideov3"
 INTERPOLATE_FPS = 60.0
-INTERPOLATE_FPS_TOLERANCE = 0.1
+INTERPOLATE_FPS_TOLERANCE = 0.5
 ProgressCallback = Callable[[str, int | None, int | None], None]
+
+# Holds the currently running subprocess so the GUI can terminate it on cancel.
+# Only written from stream_command / stream_command_with_frame_progress.
+_active_subprocess: list[subprocess.Popen | None] = [None]
 
 
 @dataclass(frozen=True)
@@ -182,7 +186,10 @@ def probe_video(ffprobe: str, input_path: Path) -> tuple[int | None, int | None,
             str(input_path),
         ]
     )
-    data = json.loads(output)
+    try:
+        data = json.loads(output)
+    except (json.JSONDecodeError, ValueError):
+        return None, None, None, None
     streams = data.get("streams", [])
     if not streams:
         return None, None, None, None
@@ -207,10 +214,15 @@ def stream_command(args: list[str], log: Callable[[str], None], cwd: str | None 
         encoding="utf-8",
         errors="replace",
     )
-    assert process.stdout is not None
-    for line in process.stdout:
-        log(line.rstrip())
-    return process.wait()
+    if process.stdout is None:
+        raise RuntimeError("subprocess stdout pipe was not created")
+    _active_subprocess[0] = process
+    try:
+        for line in process.stdout:
+            log(line.rstrip())
+        return process.wait()
+    finally:
+        _active_subprocess[0] = None
 
 
 def count_image_files(directory: Path) -> int:
@@ -299,12 +311,17 @@ def stream_command_with_frame_progress(
         encoding="utf-8",
         errors="replace",
     )
-    assert process.stdout is not None
-    for line in process.stdout:
-        text = line.rstrip()
-        if text:
-            log(f"[{log_prefix}] {text}")
-    return_code = process.wait()
+    if process.stdout is None:
+        raise RuntimeError("subprocess stdout pipe was not created")
+    _active_subprocess[0] = process
+    try:
+        for line in process.stdout:
+            text = line.rstrip()
+            if text:
+                log(f"[{log_prefix}] {text}")
+        return_code = process.wait()
+    finally:
+        _active_subprocess[0] = None
     stop_event.set()
     monitor_thread.join(timeout=5)
     return return_code
@@ -500,7 +517,7 @@ def run_rife_interpolation(
         frames_dir.mkdir()
         rife_dir.mkdir()
 
-        report_progress("Extracting frames", None, None, log, progress)
+        report_progress("Step 1/3 – Extracting frames", None, None, log, progress)
         extract_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -548,7 +565,7 @@ def run_rife_interpolation(
             rife_dir,
             target_frames,
             progress,
-            phase="Interpolating frames with RIFE",
+            phase="Step 2/3 – Interpolating with RIFE",
             log_prefix="RIFE",
             cwd=str(Path(tools.rife).parent),
         )
@@ -563,7 +580,7 @@ def run_rife_interpolation(
             return 1
 
         video_encoder = select_video_encoder(tools, codec)
-        report_progress("Reassembling 60 fps video", None, None, log, progress)
+        report_progress("Step 3/3 – Reassembling 60 fps video", None, None, log, progress)
         assemble_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -800,23 +817,26 @@ def upscale(
             log("Running FFmpeg scaler:")
         report_progress("Reassembling video", None, None, log, progress)
         return_code = stream_command(cmd, log)
-    if return_code == 0 and apply_interp60 and run_engine != "interp60":
-        return_code = run_rife_interpolation(
-            tools,
-            spatial_output_path,
-            output_path,
-            codec,
-            quality,
-            overwrite,
-            fps,
-            log,
-            progress,
-        )
+    if apply_interp60 and run_engine != "interp60":
         try:
-            if spatial_output_path.exists():
-                spatial_output_path.unlink()
-        except OSError as exc:
-            log(f"Warning: could not remove intermediate video {spatial_output_path}: {exc}")
+            if return_code == 0:
+                return_code = run_rife_interpolation(
+                    tools,
+                    spatial_output_path,
+                    output_path,
+                    codec,
+                    quality,
+                    overwrite,
+                    fps,
+                    log,
+                    progress,
+                )
+        finally:
+            try:
+                if spatial_output_path != output_path and spatial_output_path.exists():
+                    spatial_output_path.unlink()
+            except OSError as exc:
+                log(f"Warning: could not remove intermediate video {spatial_output_path}: {exc}")
     if return_code == 0:
         report_progress("Done", None, None, log, progress)
         log(f"Done: {output_path}")
@@ -855,7 +875,7 @@ def redetail_1080p_with_realesrgan(
             f"{REDETAIL_WIDTH}x{REDETAIL_HEIGHT} denoised frames -> "
             f"{TARGET_WIDTH}x{TARGET_HEIGHT} AI output"
         )
-        report_progress("Denoising and downscaling frames", None, None, log, progress)
+        report_progress("Step 1/3 – Denoising and downscaling frames", None, None, log, progress)
         extract_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -896,7 +916,7 @@ def redetail_1080p_with_realesrgan(
             "-f",
             "png",
         ]
-        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, cwd=str(exe.parent))
+        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, phase="Step 2/3 – AI re-detailing", cwd=str(exe.parent))
         if code != 0:
             log(f"Work folder preserved for inspection: {temp_path}")
             return code
@@ -913,7 +933,7 @@ def redetail_1080p_with_realesrgan(
         else:
             video_encoder = "libx264"
 
-        report_progress("Interpolating to 60 fps" if interp60 else "Reassembling video", None, None, log, progress)
+        report_progress("Step 3/3 – Reassembling video", None, None, log, progress)
         final_filter = build_video_filter(tools, False, None, None)
         assemble_cmd = [
             tools.ffmpeg,
@@ -992,7 +1012,7 @@ def upscale_1080p_to_4k_with_realesrgan(
         ai_dir.mkdir()
 
         log(f"AI 4K pipeline: {TARGET_WIDTH}x{TARGET_HEIGHT} source -> {FOUR_K_WIDTH}x{FOUR_K_HEIGHT} AI output")
-        report_progress("Extracting frames", None, None, log, progress)
+        report_progress("Step 1/3 – Extracting frames", None, None, log, progress)
         extract_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -1031,7 +1051,7 @@ def upscale_1080p_to_4k_with_realesrgan(
             "-f",
             "png",
         ]
-        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, cwd=str(exe.parent))
+        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, phase="Step 2/3 – AI upscaling to 4K", cwd=str(exe.parent))
         if code != 0:
             log(f"Work folder preserved for inspection: {temp_path}")
             return code
@@ -1048,7 +1068,7 @@ def upscale_1080p_to_4k_with_realesrgan(
         else:
             video_encoder = "libx264"
 
-        report_progress("Interpolating to 60 fps" if interp60 else "Saving 4K AI video", None, None, log, progress)
+        report_progress("Step 3/3 – Saving 4K video", None, None, log, progress)
         final_filter = build_video_filter(tools, False, None, None)
         assemble_cmd = [
             tools.ffmpeg,
@@ -1128,7 +1148,7 @@ def upscale_with_realesrgan(
         frames_dir.mkdir()
         ai_dir.mkdir()
 
-        report_progress("Extracting frames", None, None, log, progress)
+        report_progress("Step 1/4 – Extracting frames", None, None, log, progress)
         extract_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -1167,7 +1187,7 @@ def upscale_with_realesrgan(
             "-f",
             "png",
         ]
-        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, cwd=str(exe.parent))
+        code = stream_command_with_frame_progress(ai_cmd, log, ai_dir, total_frames, progress, phase="Step 2/4 – AI upscaling", cwd=str(exe.parent))
         if code != 0:
             log(f"Work folder preserved for inspection: {temp_path}")
             return code
@@ -1186,7 +1206,7 @@ def upscale_with_realesrgan(
 
         two_x_output_path = two_x_output_path or derive_2x_output_path(output_path)
         log(f"2x AI master output: {two_x_output_path}")
-        report_progress("Saving 2x AI video", None, None, log, progress)
+        report_progress("Step 3/4 – Saving 2x master", None, None, log, progress)
         assemble_2x_cmd = [
             tools.ffmpeg,
             "-hide_banner",
@@ -1228,13 +1248,7 @@ def upscale_with_realesrgan(
             log(f"Work folder preserved for inspection: {temp_path}")
             return code
 
-        report_progress(
-            "Downscaling to 1080p and interpolating to 60 fps" if interp60 else "Downscaling to 1080p",
-            None,
-            None,
-            log,
-            progress,
-        )
+        report_progress("Step 4/4 – Downscaling to 1080p", None, None, log, progress)
         final_filter = build_video_filter(tools, enhance)
         downscale_cmd = [
             tools.ffmpeg,
@@ -1285,8 +1299,8 @@ def launch_gui() -> None:
 
     root = tk.Tk()
     root.title("NVIDIA Video Upscaler")
-    root.geometry("760x520")
-    root.minsize(680, 460)
+    root.geometry("760x580")
+    root.minsize(680, 520)
 
     input_var = tk.StringVar()
     output_var = tk.StringVar()
@@ -1298,7 +1312,10 @@ def launch_gui() -> None:
     overwrite_var = tk.BooleanVar(value=False)
     progress_var = tk.DoubleVar(value=0.0)
     progress_text_var = tk.StringVar(value="Idle")
-    messages = queue.Queue()
+    elapsed_var = tk.StringVar(value="")
+    tool_status_var = tk.StringVar(value="Checking tools…")
+    messages: queue.Queue = queue.Queue()
+
     workflows = {
         "Fast enhance 1080p": "enhance",
         "AI re-detail 1080p": "redetail",
@@ -1308,7 +1325,48 @@ def launch_gui() -> None:
         "Interpolate existing video to 60 fps": "interp60",
     }
     ai_workflows = {"AI re-detail 1080p", "AI 4K upscale", "720p AI upscale"}
+    rife_workflows = {"Interpolate existing video to 60 fps"}
 
+    # Mutable state cells (lists allow mutation from nested functions)
+    _job_start_time: list[float | None] = [None]
+    _elapsed_after_id: list[str | None] = [None]
+    _last_output_path: list[str] = [""]
+    _cancel_event = threading.Event()
+
+    # --- Settings persistence ---
+    _prefs_path = Path.home() / ".video-upscaler-prefs.json"
+
+    def load_settings() -> None:
+        try:
+            prefs = json.loads(_prefs_path.read_text(encoding="utf-8"))
+            if prefs.get("workflow") in workflows:
+                workflow_var.set(prefs["workflow"])
+            if prefs.get("codec") in ("h264", "hevc"):
+                codec_var.set(prefs["codec"])
+            if isinstance(prefs.get("quality"), int):
+                quality_var.set(max(14, min(28, prefs["quality"])))
+            if isinstance(prefs.get("interp60"), bool):
+                interp60_var.set(prefs["interp60"])
+        except (OSError, json.JSONDecodeError, KeyError):
+            pass
+
+    def save_settings() -> None:
+        try:
+            prefs = {
+                "workflow": workflow_var.get(),
+                "codec": codec_var.get(),
+                "quality": quality_var.get(),
+                "interp60": interp60_var.get(),
+            }
+            _prefs_path.write_text(json.dumps(prefs, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def on_close() -> None:
+        save_settings()
+        root.destroy()
+
+    # --- Tooltip ---
     class Tooltip:
         def __init__(self, widget: tk.Widget, text: str) -> None:
             self.widget = widget
@@ -1343,6 +1401,7 @@ def launch_gui() -> None:
                 self.tip.destroy()
                 self.tip = None
 
+    # --- Output path helpers ---
     def default_output_for(path: Path) -> Path:
         workflow = workflow_var.get()
         interpolate = interp60_var.get() and workflow != "Interpolate existing video to 60 fps"
@@ -1367,13 +1426,17 @@ def launch_gui() -> None:
     def update_workflow_controls(_event: tk.Event | None = None) -> None:
         workflow = workflow_var.get()
         if workflow == "Interpolate existing video to 60 fps":
+            interp60_var.set(False)
             interp60_check.state(["disabled"])
         else:
             interp60_check.state(["!disabled"])
         model_combo.configure(state="readonly" if workflow in ai_workflows else "disabled")
-        start_button.configure(text="Interpolate to 60 fps" if workflow == "Interpolate existing video to 60 fps" else "Process video")
+        start_button.configure(
+            text="Interpolate to 60 fps" if workflow == "Interpolate existing video to 60 fps" else "Process video"
+        )
         update_default_output()
 
+    # --- File dialogs ---
     def choose_input() -> None:
         filename = filedialog.askopenfilename(
             title="Choose source video",
@@ -1384,8 +1447,7 @@ def launch_gui() -> None:
         )
         if filename:
             input_var.set(filename)
-            path = Path(filename)
-            output_var.set(str(default_output_for(path)))
+            output_var.set(str(default_output_for(Path(filename))))
 
     def choose_output() -> None:
         filename = filedialog.asksaveasfilename(
@@ -1396,12 +1458,14 @@ def launch_gui() -> None:
         if filename:
             output_var.set(filename)
 
+    # --- Log ---
     def append_log(text: str) -> None:
         log_box.configure(state="normal")
         log_box.insert("end", text + "\n")
         log_box.see("end")
         log_box.configure(state="disabled")
 
+    # --- Progress ---
     def queue_progress(phase: str, current: int | None, total: int | None) -> None:
         messages.put(("progress", phase, current, total))
 
@@ -1416,37 +1480,174 @@ def launch_gui() -> None:
         else:
             progress_text_var.set(phase)
 
+    # --- Control locking ---
+    def set_controls_enabled(enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        input_entry.configure(state=state)
+        output_entry.configure(state=state)
+        input_browse_btn.configure(state=state)
+        output_browse_btn.configure(state=state)
+        workflow_combo.configure(state="readonly" if enabled else "disabled")
+        model_combo.configure(
+            state="readonly" if enabled and workflow_var.get() in ai_workflows else "disabled"
+        )
+        for rb in codec_radios:
+            rb.configure(state=state)
+        quality_scale.configure(state=state)
+        overwrite_check.configure(state=state)
+        if enabled:
+            workflow = workflow_var.get()
+            if workflow == "Interpolate existing video to 60 fps":
+                interp60_check.state(["disabled"])
+            else:
+                interp60_check.state(["!disabled"])
+        else:
+            interp60_check.state(["disabled"])
+
+    # --- Elapsed timer ---
+    def tick_elapsed() -> None:
+        if _job_start_time[0] is None:
+            return
+        elapsed = int(time.monotonic() - _job_start_time[0])
+        m, s = divmod(elapsed, 60)
+        elapsed_var.set(f"  |  Elapsed: {m}m {s:02d}s")
+        _elapsed_after_id[0] = root.after(1000, tick_elapsed)
+
+    def stop_elapsed() -> None:
+        if _elapsed_after_id[0]:
+            root.after_cancel(_elapsed_after_id[0])
+            _elapsed_after_id[0] = None
+        _job_start_time[0] = None
+
+    # --- Job lifecycle ---
+    def on_job_done(success: bool, output_path_str: str) -> None:
+        stop_elapsed()
+        set_controls_enabled(True)
+        start_button.grid()
+        cancel_button.grid_remove()
+        if success and output_path_str:
+            _last_output_path[0] = output_path_str
+            reveal_button.grid()
+        else:
+            reveal_button.grid_remove()
+
+    def open_output_folder() -> None:
+        p = Path(_last_output_path[0])
+        folder = p.parent if p.is_file() else p
+        try:
+            os.startfile(str(folder))
+        except (OSError, AttributeError):
+            messagebox.showinfo("Output folder", str(folder))
+
+    def cancel_job() -> None:
+        _cancel_event.set()
+        proc = _active_subprocess[0]
+        if proc is not None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+
+    # --- Message drain loop ---
     def drain_messages() -> None:
         try:
             while True:
                 item = messages.get_nowait()
-                if isinstance(item, tuple) and item and item[0] == "progress":
-                    _, phase, current, total = item
-                    apply_progress(phase, current, total)
+                if isinstance(item, tuple) and item:
+                    kind = item[0]
+                    if kind == "progress":
+                        try:
+                            _, phase, current, total = item
+                            apply_progress(phase, current, total)
+                        except (ValueError, TypeError):
+                            append_log(str(item))
+                    elif kind == "done":
+                        try:
+                            _, success, output_path_str = item
+                            on_job_done(success, output_path_str)
+                        except (ValueError, TypeError):
+                            pass
+                    elif kind == "tool_status":
+                        try:
+                            _, status_text = item
+                            tool_status_var.set(status_text)
+                        except (ValueError, TypeError):
+                            pass
+                    else:
+                        append_log(str(item))
                 else:
                     append_log(str(item))
         except queue.Empty:
             pass
         root.after(100, drain_messages)
 
+    # --- Pre-flight validation ---
+    def validate_inputs(input_path: Path, output_path: Path, engine: str) -> list[str]:
+        warnings: list[str] = []
+        if not input_path.exists():
+            warnings.append(f"Input file not found:\n{input_path}")
+            return warnings
+        if not input_path.is_file():
+            warnings.append(f"Input is not a file:\n{input_path}")
+            return warnings
+        out_dir = output_path.parent
+        if not out_dir.exists():
+            warnings.append(f"Output directory does not exist:\n{out_dir}")
+        try:
+            tools = inspect_tools()
+            w, h, _dur, _fps = probe_video(tools.ffprobe, input_path)
+            if w and h:
+                if engine == "ai" and (w != 1280 or h != 720):
+                    warnings.append(
+                        f"'720p AI upscale' expects a 1280×720 source, but input is {w}×{h}.\n"
+                        "Processing will fail."
+                    )
+                elif engine in ("redetail", "ai4k") and (w != TARGET_WIDTH or h != TARGET_HEIGHT):
+                    warnings.append(
+                        f"This workflow expects a 1920×1080 source, but input is {w}×{h}.\n"
+                        "Processing will fail."
+                    )
+        except Exception:
+            pass
+        return warnings
+
+    # --- Start / Cancel ---
     def start() -> None:
         if not input_var.get():
             messagebox.showerror("Missing input", "Choose a source video first.")
             return
         selected_workflow = workflow_var.get()
         selected_engine = workflows[selected_workflow]
-        start_button.configure(state="disabled")
+        input_path = Path(input_var.get())
+        out_str = output_var.get() or str(default_output_for(input_path))
+        output_path = Path(out_str)
+
+        warnings = validate_inputs(input_path, output_path, selected_engine)
+        if warnings:
+            msg = "\n\n".join(warnings) + "\n\nProceed anyway?"
+            if not messagebox.askokcancel("Validation warnings", msg):
+                return
+
+        _cancel_event.clear()
+        set_controls_enabled(False)
+        start_button.grid_remove()
+        cancel_button.grid()
+        reveal_button.grid_remove()
         progress_var.set(0.0)
         progress_text_var.set("Starting")
+        elapsed_var.set("")
         log_box.configure(state="normal")
         log_box.delete("1.0", "end")
         log_box.configure(state="disabled")
+        _job_start_time[0] = time.monotonic()
+        tick_elapsed()
 
         def worker() -> None:
+            success = False
             try:
                 code = upscale(
-                    input_var.get(),
-                    output_var.get() or None,
+                    str(input_path),
+                    out_str,
                     selected_engine,
                     model_var.get(),
                     codec_var.get(),
@@ -1457,41 +1658,67 @@ def launch_gui() -> None:
                     messages.put,
                     queue_progress,
                 )
-                if code != 0:
-                    messages.put("Upscale failed. Check the FFmpeg log above.")
+                success = code == 0
+                if not success and not _cancel_event.is_set():
+                    messages.put(f"Upscale failed. Output was: {out_str}\nCheck the log above.")
+                elif _cancel_event.is_set():
+                    messages.put("Cancelled.")
             except Exception as exc:  # GUI boundary: show unexpected failures in log.
                 messages.put(f"Error: {exc}")
             finally:
-                root.after(0, lambda: start_button.configure(state="normal"))
+                messages.put(("done", success, out_str if success else ""))
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # --- Tool check at startup ---
+    def check_tools_background() -> None:
+        try:
+            tools = inspect_tools()
+            parts = []
+            parts.append("FFmpeg: OK")
+            parts.append(f"NVENC: {'H.264+HEVC' if tools.has_h264_nvenc and tools.has_hevc_nvenc else 'H.264' if tools.has_h264_nvenc else 'HEVC' if tools.has_hevc_nvenc else 'NOT FOUND'}")
+            parts.append(f"Real-ESRGAN: {'OK' if tools.realesrgan else 'not found (AI workflows unavailable)'}")
+            parts.append(f"RIFE: {'OK' if tools.rife else 'not found (interpolation unavailable)'}")
+            messages.put(("tool_status", "  ".join(parts)))
+        except Exception as exc:
+            messages.put(("tool_status", f"Tool check failed: {exc}"))
+
+    threading.Thread(target=check_tools_background, daemon=True).start()
+
+    # ------------------------------------------------------------------ layout
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(11, weight=1)
+    frame.rowconfigure(12, weight=1)
 
+    # Row 0: input
     ttk.Label(frame, text="Input video").grid(row=0, column=0, sticky="w", pady=4)
-    ttk.Entry(frame, textvariable=input_var).grid(row=0, column=1, sticky="ew", padx=8)
-    ttk.Button(frame, text="Browse", command=choose_input).grid(row=0, column=2)
+    input_entry = ttk.Entry(frame, textvariable=input_var)
+    input_entry.grid(row=0, column=1, sticky="ew", padx=8)
+    input_browse_btn = ttk.Button(frame, text="Browse", command=choose_input)
+    input_browse_btn.grid(row=0, column=2)
 
+    # Row 1: output
     ttk.Label(frame, text="Output video").grid(row=1, column=0, sticky="w", pady=4)
-    ttk.Entry(frame, textvariable=output_var).grid(row=1, column=1, sticky="ew", padx=8)
-    ttk.Button(frame, text="Browse", command=choose_output).grid(row=1, column=2)
+    output_entry = ttk.Entry(frame, textvariable=output_var)
+    output_entry.grid(row=1, column=1, sticky="ew", padx=8)
+    output_browse_btn = ttk.Button(frame, text="Browse", command=choose_output)
+    output_browse_btn.grid(row=1, column=2)
 
+    # Row 2: codec
     ttk.Label(frame, text="Codec").grid(row=2, column=0, sticky="w", pady=4)
     codec_frame = ttk.Frame(frame)
     codec_frame.grid(row=2, column=1, sticky="w", padx=8)
-    ttk.Radiobutton(codec_frame, text="H.264 NVENC", value="h264", variable=codec_var).pack(side="left")
-    ttk.Radiobutton(codec_frame, text="HEVC NVENC", value="hevc", variable=codec_var).pack(side="left", padx=16)
+    codec_radios = [
+        ttk.Radiobutton(codec_frame, text="H.264 NVENC", value="h264", variable=codec_var),
+        ttk.Radiobutton(codec_frame, text="HEVC NVENC", value="hevc", variable=codec_var),
+    ]
+    codec_radios[0].pack(side="left")
+    codec_radios[1].pack(side="left", padx=16)
 
+    # Row 3: workflow
     ttk.Label(frame, text="Workflow").grid(row=3, column=0, sticky="w", pady=4)
-    workflow_combo = ttk.Combobox(
-        frame,
-        textvariable=workflow_var,
-        values=tuple(workflows.keys()),
-        state="readonly",
-    )
+    workflow_combo = ttk.Combobox(frame, textvariable=workflow_var, values=tuple(workflows.keys()), state="readonly")
     workflow_combo.grid(row=3, column=1, sticky="ew", padx=8)
     workflow_combo.bind("<<ComboboxSelected>>", update_workflow_controls)
     Tooltip(
@@ -1504,43 +1731,70 @@ def launch_gui() -> None:
         "Interpolate existing video to 60 fps: preserve resolution and change frame rate only.",
     )
 
-    ttk.Label(frame, text="AI model").grid(row=4, column=0, sticky="w", pady=4)
+    # Row 4: tool status (auto-populated at startup)
+    ttk.Label(frame, textvariable=tool_status_var, foreground="gray").grid(
+        row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4)
+    )
+
+    # Row 5: AI model
+    ttk.Label(frame, text="AI model").grid(row=5, column=0, sticky="w", pady=4)
     model_combo = ttk.Combobox(
         frame,
         textvariable=model_var,
         values=("realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"),
-        state="readonly",
+        state="disabled",
     )
-    model_combo.grid(row=4, column=1, sticky="ew", padx=8)
+    model_combo.grid(row=5, column=1, sticky="ew", padx=8)
 
-    ttk.Label(frame, text="Quality").grid(row=5, column=0, sticky="w", pady=4)
-    ttk.Scale(frame, from_=14, to=28, variable=quality_var, orient="horizontal").grid(
-        row=5, column=1, sticky="ew", padx=8
+    # Row 6: quality
+    ttk.Label(frame, text="Quality").grid(row=6, column=0, sticky="w", pady=4)
+    quality_scale = ttk.Scale(frame, from_=14, to=28, variable=quality_var, orient="horizontal")
+    quality_scale.grid(row=6, column=1, sticky="ew", padx=8)
+    ttk.Label(frame, textvariable=quality_var, width=4).grid(row=6, column=2, sticky="w")
+
+    # Row 7: interp60
+    interp60_check = ttk.Checkbutton(
+        frame, text="Interpolate to 60 fps", variable=interp60_var, command=update_default_output
     )
-    ttk.Label(frame, textvariable=quality_var, width=4).grid(row=5, column=2, sticky="w")
-
-    interp60_check = ttk.Checkbutton(frame, text="Interpolate to 60 fps", variable=interp60_var, command=update_default_output)
-    interp60_check.grid(row=6, column=1, sticky="w", padx=8, pady=4)
+    interp60_check.grid(row=7, column=1, sticky="w", padx=8, pady=4)
     Tooltip(
         interp60_check,
         "Uses RIFE on the GPU to produce exact 60 fps. "
         "The app extracts frames, runs rife-ncnn-vulkan, then reassembles with NVENC.",
     )
 
-    ttk.Checkbutton(frame, text="Overwrite output if it exists", variable=overwrite_var).grid(
-        row=7, column=1, sticky="w", padx=8, pady=4
-    )
+    # Row 8: overwrite
+    overwrite_check = ttk.Checkbutton(frame, text="Overwrite output if it exists", variable=overwrite_var)
+    overwrite_check.grid(row=8, column=1, sticky="w", padx=8, pady=4)
 
-    start_button = ttk.Button(frame, text="Process video", command=start)
-    start_button.grid(row=8, column=1, sticky="w", padx=8, pady=10)
+    # Row 9: action buttons
+    btn_frame = ttk.Frame(frame)
+    btn_frame.grid(row=9, column=0, columnspan=3, sticky="w", padx=8, pady=10)
+    start_button = ttk.Button(btn_frame, text="Process video", command=start)
+    start_button.grid(row=0, column=0)
+    cancel_button = ttk.Button(btn_frame, text="Cancel", command=cancel_job)
+    cancel_button.grid(row=0, column=0)
+    cancel_button.grid_remove()
+    reveal_button = ttk.Button(btn_frame, text="Open folder", command=open_output_folder)
+    reveal_button.grid(row=0, column=1, padx=(12, 0))
+    reveal_button.grid_remove()
 
+    # Row 10: progress bar
     progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, mode="determinate")
-    progress_bar.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(4, 2))
-    ttk.Label(frame, textvariable=progress_text_var).grid(row=10, column=0, columnspan=3, sticky="w")
+    progress_bar.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(4, 2))
 
-    log_box = tk.Text(frame, height=14, state="disabled", wrap="word")
-    log_box.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+    # Row 11: status + elapsed
+    status_frame = ttk.Frame(frame)
+    status_frame.grid(row=11, column=0, columnspan=3, sticky="ew")
+    ttk.Label(status_frame, textvariable=progress_text_var).pack(side="left")
+    ttk.Label(status_frame, textvariable=elapsed_var, foreground="gray").pack(side="left")
 
+    # Row 12: log (expands)
+    log_box = tk.Text(frame, height=10, state="disabled", wrap="word")
+    log_box.grid(row=12, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+    load_settings()
     update_workflow_controls()
     drain_messages()
     root.mainloop()
