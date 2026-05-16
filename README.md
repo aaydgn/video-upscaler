@@ -77,6 +77,24 @@ run-ui.bat
 Choose the source video, choose a workflow, choose the output path, and click
 `Process video`.
 
+At startup the UI checks which tools are available (FFmpeg, NVENC, Real-ESRGAN,
+RIFE) and shows a one-line status below the Workflow selector. AI workflows that
+require a missing tool will warn before the job starts.
+
+While a job runs all input controls lock and a **Cancel** button replaces the
+Process button — clicking it terminates the active FFmpeg or Real-ESRGAN
+process. An elapsed-time counter appears next to the progress label. On
+successful completion an **Open folder** button reveals the output directory in
+Explorer.
+
+Before a job starts the UI validates that the input file exists, the output
+directory is writable, and the video resolution matches the selected workflow
+(for example, 720p AI upscale requires a `1280×720` source). Mismatches show a
+warning dialog with the option to proceed or cancel.
+
+Codec, quality, workflow, and interpolation preferences are saved automatically
+when the window closes and restored on next launch.
+
 ## CLI
 
 ```powershell
