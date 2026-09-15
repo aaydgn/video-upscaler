@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import shutil
-import uuid
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -48,10 +48,8 @@ def run_rife_interpolation(
         fps = 30.0
         log("Warning: could not detect frame rate for RIFE; using 30 fps for frame-count math.")
 
-    temp_path = output_path.parent / f"{output_path.stem}_rife_work_{uuid.uuid4().hex[:8]}"
-    success = False
+    temp_path = Path(tempfile.mkdtemp(prefix="upscaler_rife_"))
     try:
-        temp_path.mkdir(parents=True, exist_ok=False)
         frames_dir = temp_path / "frames"
         rife_dir = temp_path / "rife_frames"
         frames_dir.mkdir()
@@ -68,12 +66,10 @@ def run_rife_interpolation(
         ]
         code = stream_command(extract_cmd, log)
         if code != 0:
-            log(f"Work folder preserved for inspection: {temp_path}")
             return code
 
         total_frames = count_image_files(frames_dir)
         if total_frames <= 0:
-            log(f"No extracted frames found. Work folder preserved for inspection: {temp_path}")
             return 1
         target_frames = max(total_frames, round(total_frames * INTERPOLATE_FPS / fps))
         log(f"RIFE target: {total_frames} frames at {fps:.3f} fps -> {target_frames} frames at 60 fps.")
@@ -110,13 +106,11 @@ def run_rife_interpolation(
             cwd=str(Path(tools.rife).parent),
         )
         if code != 0:
-            log(f"Work folder preserved for inspection: {temp_path}")
             return code
 
         processed_frames = count_image_files(rife_dir)
         if processed_frames < target_frames:
             log(f"Expected {target_frames} RIFE frames, found {processed_frames}.")
-            log(f"Work folder preserved for inspection: {temp_path}")
             return 1
 
         video_encoder = select_video_encoder(tools, codec)
@@ -160,17 +154,12 @@ def run_rife_interpolation(
             str(output_path),
         ]
         code = stream_command(assemble_cmd, log)
-        success = code == 0
-        if not success:
-            log(f"Work folder preserved for inspection: {temp_path}")
         return code
     finally:
-        if success:
-            try:
-                if temp_path.exists():
-                    shutil.rmtree(temp_path)
-            except OSError as exc:
-                log(f"Warning: could not remove work folder {temp_path}: {exc}")
+        try:
+            shutil.rmtree(temp_path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def run_ai_upscale(
@@ -193,10 +182,8 @@ def run_ai_upscale(
     exe = Path(tools.realesrgan)
     if scale <= 3:
         model = select_two_x_model(model, log)
-    temp_path = output_path.parent / f"{output_path.stem}_work_{uuid.uuid4().hex[:8]}"
-    success = False
+    temp_path = Path(tempfile.mkdtemp(prefix="upscaler_ai_"))
     try:
-        temp_path.mkdir(parents=True, exist_ok=False)
         frames_dir = temp_path / "frames"
         ai_dir = temp_path / "ai_frames"
         frames_dir.mkdir()
@@ -221,12 +208,10 @@ def run_ai_upscale(
         extract_cmd.append(str(frames_dir / "frame_%08d.png"))
         code = stream_command(extract_cmd, log)
         if code != 0:
-            log(f"Work folder preserved for inspection: {temp_path}")
             return code
 
         total_frames = count_image_files(frames_dir)
         if total_frames <= 0:
-            log(f"No extracted frames found. Work folder preserved: {temp_path}")
             return 1
         log(f"Extracted {total_frames} frames.")
 
@@ -260,13 +245,11 @@ def run_ai_upscale(
             cwd=str(exe.parent),
         )
         if code != 0:
-            log(f"Work folder preserved for inspection: {temp_path}")
             return code
 
         processed_frames = count_image_files(ai_dir)
         if processed_frames < total_frames:
             log(f"Expected {total_frames} AI frames, found {processed_frames}.")
-            log(f"Work folder preserved for inspection: {temp_path}")
             return 1
 
         video_encoder = select_video_encoder(tools, codec)
@@ -312,17 +295,12 @@ def run_ai_upscale(
             str(output_path),
         ])
         code = stream_command(assemble_cmd, log)
-        success = code == 0
-        if not success:
-            log(f"Work folder preserved for inspection: {temp_path}")
         return code
     finally:
-        if success:
-            try:
-                if temp_path.exists():
-                    shutil.rmtree(temp_path)
-            except OSError as exc:
-                log(f"Warning: could not remove work folder {temp_path}: {exc}")
+        try:
+            shutil.rmtree(temp_path, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def upscale(
