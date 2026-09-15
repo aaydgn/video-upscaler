@@ -145,9 +145,11 @@ def launch_gui() -> None:
         if val > 1:
             model_label.grid()
             model_combo.grid()
+            model_combo.configure(state="readonly")
         else:
             model_label.grid_remove()
             model_combo.grid_remove()
+            model_combo.configure(state="disabled")
         update_default_output()
 
     def on_quality_change(_value: str) -> None:
