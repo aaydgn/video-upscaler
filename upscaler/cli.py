@@ -12,17 +12,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upscale, enhance, or interpolate video with FFmpeg and NVIDIA encoding.")
     parser.add_argument("input", nargs="?", help="Input video path. Omit to launch the GUI.")
     parser.add_argument("-o", "--output", help="Output video path.")
-    parser.add_argument(
-        "--engine",
-        choices=["ffmpeg", "ai", "interp60"],
-        default="ffmpeg",
-        help="FFmpeg encode/enhance, AI 2x upscale, or standalone 60 fps interpolation.",
-    )
+    parser.add_argument("--scale", type=int, choices=[1, 2, 3, 4], default=1, help="AI upscale factor. 1 = off, 2/3/4 = Real-ESRGAN upscale.")
     parser.add_argument(
         "--model",
         choices=["realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"],
         default=AI_2X_MODEL,
-        help="Real-ESRGAN model.",
+        help="Real-ESRGAN model (default auto-selected per scale).",
     )
     parser.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="NVENC codec.")
     parser.add_argument("--quality", type=int, default=19, help="NVENC CQ value, lower is larger/better.")
@@ -59,12 +54,15 @@ def main(argv: list[str] | None = None) -> int:
 
         launch_gui()
         return 0
+
+    engine = "ai" if args.scale > 1 else "ffmpeg"
     try:
         return upscale(
             args.input,
             args.output,
-            args.engine,
+            engine,
             args.model,
+            args.scale,
             args.codec,
             args.quality,
             args.overwrite,

@@ -19,30 +19,31 @@ def launch_gui() -> None:
 
     root = tk.Tk()
     root.title("NVIDIA Video Upscaler")
-    root.geometry("760x580")
-    root.minsize(680, 520)
+    root.geometry("620x520")
+    root.minsize(520, 460)
 
     input_var = tk.StringVar()
     output_var = tk.StringVar()
-    workflow_var = tk.StringVar(value="Enhance")
-    model_var = tk.StringVar(value=AI_2X_MODEL)
+    ai_scale_var = tk.IntVar(value=1)
+    ai_scale_label_var = tk.StringVar(value="Off")
+    model_var = tk.StringVar(value="Animation")
     codec_var = tk.StringVar(value="h264")
     quality_var = tk.IntVar(value=19)
     enhance_var = tk.BooleanVar(value=True)
     interp60_var = tk.BooleanVar(value=False)
-    overwrite_var = tk.BooleanVar(value=False)
     progress_var = tk.DoubleVar(value=0.0)
     progress_text_var = tk.StringVar(value="Idle")
     elapsed_var = tk.StringVar(value="")
     tool_status_var = tk.StringVar(value="Checking tools…")
     messages: queue.Queue = queue.Queue()
 
-    workflows = {
-        "Enhance": "ffmpeg",
-        "AI upscale 2x": "ai",
-        "Interpolate to 60 fps": "interp60",
+    scale_labels = {1: "Off", 2: "2x", 3: "3x", 4: "4x"}
+    models = {
+        "General": "realesrgan-x4plus",
+        "Animation": "realesr-animevideov3",
+        "Anime": "realesrgan-x4plus-anime",
+        "Fast": "realesrnet-x4plus",
     }
-    ai_workflows = {"AI upscale 2x"}
 
     _job_start_time: list[float | None] = [None]
     _elapsed_after_id: list[str | None] = [None]
@@ -54,12 +55,14 @@ def launch_gui() -> None:
     def load_settings() -> None:
         try:
             prefs = json.loads(_prefs_path.read_text(encoding="utf-8"))
-            if prefs.get("workflow") in workflows:
-                workflow_var.set(prefs["workflow"])
             if prefs.get("codec") in ("h264", "hevc"):
                 codec_var.set(prefs["codec"])
             if isinstance(prefs.get("quality"), int):
                 quality_var.set(max(14, min(28, prefs["quality"])))
+            if isinstance(prefs.get("ai_scale"), int) and prefs["ai_scale"] in scale_labels:
+                ai_scale_var.set(prefs["ai_scale"])
+            if prefs.get("model") in models:
+                model_var.set(prefs["model"])
             if isinstance(prefs.get("enhance"), bool):
                 enhance_var.set(prefs["enhance"])
             if isinstance(prefs.get("interp60"), bool):
@@ -70,9 +73,10 @@ def launch_gui() -> None:
     def save_settings() -> None:
         try:
             prefs = {
-                "workflow": workflow_var.get(),
                 "codec": codec_var.get(),
                 "quality": quality_var.get(),
+                "ai_scale": ai_scale_var.get(),
+                "model": model_var.get(),
                 "enhance": enhance_var.get(),
                 "interp60": interp60_var.get(),
             }
@@ -119,38 +123,35 @@ def launch_gui() -> None:
                 self.tip = None
 
     def default_output_for(path: Path) -> Path:
-        workflow = workflow_var.get()
-        interpolate = interp60_var.get() and workflow != "Interpolate to 60 fps"
-        if workflow == "Interpolate to 60 fps":
-            suffix = "60fps"
-        elif workflow == "AI upscale 2x":
-            suffix = "ai2x"
-        elif enhance_var.get():
-            suffix = "enhanced"
-        else:
-            suffix = "encoded"
-        if interpolate:
-            suffix += "_60fps"
+        scale = ai_scale_var.get()
+        parts = []
+        if scale > 1:
+            parts.append(f"ai{scale}x")
+        if enhance_var.get():
+            parts.append("enhanced")
+        if interp60_var.get():
+            parts.append("60fps")
+        suffix = "_".join(parts) if parts else "encoded"
         return path.with_name(f"{path.stem}_{suffix}.mp4")
 
-    def update_default_output(_event: tk.Event | None = None) -> None:
+    def update_default_output(*_args: object) -> None:
         if input_var.get():
             output_var.set(str(default_output_for(Path(input_var.get()))))
 
-    def update_workflow_controls(_event: tk.Event | None = None) -> None:
-        workflow = workflow_var.get()
-        if workflow == "Interpolate to 60 fps":
-            interp60_var.set(False)
-            interp60_check.state(["disabled"])
-            enhance_check.state(["disabled"])
+    def on_scale_change(_value: str) -> None:
+        val = round(float(_value))
+        ai_scale_var.set(val)
+        ai_scale_label_var.set(scale_labels[val])
+        if val > 1:
+            model_label.grid()
+            model_combo.grid()
         else:
-            interp60_check.state(["!disabled"])
-            enhance_check.state(["!disabled"])
-        model_combo.configure(state="readonly" if workflow in ai_workflows else "disabled")
-        start_button.configure(
-            text="Interpolate to 60 fps" if workflow == "Interpolate to 60 fps" else "Process video"
-        )
+            model_label.grid_remove()
+            model_combo.grid_remove()
         update_default_output()
+
+    def on_quality_change(_value: str) -> None:
+        quality_var.set(round(float(_value)))
 
     def choose_input() -> None:
         filename = filedialog.askopenfilename(
@@ -162,7 +163,7 @@ def launch_gui() -> None:
         )
         if filename:
             input_var.set(filename)
-            output_var.set(str(default_output_for(Path(filename))))
+            update_default_output()
 
     def choose_output() -> None:
         filename = filedialog.asksaveasfilename(
@@ -199,25 +200,17 @@ def launch_gui() -> None:
         output_entry.configure(state=state)
         input_browse_btn.configure(state=state)
         output_browse_btn.configure(state=state)
-        workflow_combo.configure(state="readonly" if enabled else "disabled")
-        model_combo.configure(
-            state="readonly" if enabled and workflow_var.get() in ai_workflows else "disabled"
-        )
+        ai_scale_slider.configure(state=state)
+        model_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
         for rb in codec_radios:
             rb.configure(state=state)
         quality_scale.configure(state=state)
-        overwrite_check.configure(state=state)
         if enabled:
-            workflow = workflow_var.get()
-            if workflow == "Interpolate to 60 fps":
-                interp60_check.state(["disabled"])
-                enhance_check.state(["disabled"])
-            else:
-                interp60_check.state(["!disabled"])
-                enhance_check.state(["!disabled"])
+            enhance_check.state(["!disabled"])
+            interp60_check.state(["!disabled"])
         else:
-            interp60_check.state(["disabled"])
             enhance_check.state(["disabled"])
+            interp60_check.state(["disabled"])
 
     def tick_elapsed() -> None:
         if _job_start_time[0] is None:
@@ -293,34 +286,25 @@ def launch_gui() -> None:
             pass
         root.after(100, drain_messages)
 
-    def validate_inputs(input_path: Path, output_path: Path) -> list[str]:
-        warnings: list[str] = []
-        if not input_path.exists():
-            warnings.append(f"Input file not found:\n{input_path}")
-            return warnings
-        if not input_path.is_file():
-            warnings.append(f"Input is not a file:\n{input_path}")
-            return warnings
-        out_dir = output_path.parent
-        if not out_dir.exists():
-            warnings.append(f"Output directory does not exist:\n{out_dir}")
-        return warnings
-
     def start() -> None:
         if not input_var.get():
             messagebox.showerror("Missing input", "Choose a source video first.")
             return
-        selected_workflow = workflow_var.get()
-        selected_engine = workflows[selected_workflow]
         input_path = Path(input_var.get())
+        if not input_path.exists():
+            messagebox.showerror("Not found", f"Input file not found:\n{input_path}")
+            return
         out_str = output_var.get() or str(default_output_for(input_path))
         output_path = Path(out_str)
 
-        warnings = validate_inputs(input_path, output_path)
-        if warnings:
-            msg = "\n\n".join(warnings) + "\n\nProceed anyway?"
-            if not messagebox.askokcancel("Validation warnings", msg):
+        if output_path.exists():
+            if not messagebox.askyesno("File exists", f"Overwrite?\n{output_path.name}"):
                 return
+
+        scale = ai_scale_var.get()
+        engine = "ai" if scale > 1 else "ffmpeg"
+        model_key = model_var.get()
+        model = models.get(model_key, AI_2X_MODEL)
 
         _cancel_event.clear()
         set_controls_enabled(False)
@@ -342,13 +326,14 @@ def launch_gui() -> None:
                 code = upscale(
                     str(input_path),
                     out_str,
-                    selected_engine,
-                    model_var.get(),
+                    engine,
+                    model,
+                    scale,
                     codec_var.get(),
                     quality_var.get(),
-                    overwrite_var.get(),
+                    True,
                     enhance_var.get(),
-                    interp60_var.get() and selected_workflow != "Interpolate to 60 fps",
+                    interp60_var.get(),
                     None,
                     messages.put,
                     queue_progress,
@@ -368,12 +353,12 @@ def launch_gui() -> None:
     def check_tools_background() -> None:
         try:
             tools = inspect_tools()
-            parts = []
-            parts.append("FFmpeg: OK")
-            parts.append(f"NVENC: {'H.264+HEVC' if tools.has_h264_nvenc and tools.has_hevc_nvenc else 'H.264' if tools.has_h264_nvenc else 'HEVC' if tools.has_hevc_nvenc else 'NOT FOUND'}")
-            parts.append(f"Real-ESRGAN: {'OK' if tools.realesrgan else 'not found (AI workflows unavailable)'}")
-            parts.append(f"RIFE: {'OK' if tools.rife else 'not found (interpolation unavailable)'}")
-            messages.put(("tool_status", "  ".join(parts)))
+            parts = ["FFmpeg ✓"]
+            nvenc = "H.264+HEVC" if tools.has_h264_nvenc and tools.has_hevc_nvenc else "H.264" if tools.has_h264_nvenc else "HEVC" if tools.has_hevc_nvenc else None
+            parts.append(f"NVENC {nvenc}" if nvenc else "NVENC ✗")
+            parts.append("ESRGAN ✓" if tools.realesrgan else "ESRGAN ✗")
+            parts.append("RIFE ✓" if tools.rife else "RIFE ✗")
+            messages.put(("tool_status", "  ·  ".join(parts)))
         except Exception as exc:
             messages.put(("tool_status", f"Tool check failed: {exc}"))
 
@@ -383,84 +368,90 @@ def launch_gui() -> None:
     frame = ttk.Frame(root, padding=16)
     frame.pack(fill="both", expand=True)
     frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(13, weight=1)
 
-    ttk.Label(frame, text="Input video").grid(row=0, column=0, sticky="w", pady=4)
+    row = 0
+
+    # --- Input ---
+    ttk.Label(frame, text="Input").grid(row=row, column=0, sticky="w", pady=4)
     input_entry = ttk.Entry(frame, textvariable=input_var)
-    input_entry.grid(row=0, column=1, sticky="ew", padx=8)
+    input_entry.grid(row=row, column=1, sticky="ew", padx=8)
     input_browse_btn = ttk.Button(frame, text="Browse", command=choose_input)
-    input_browse_btn.grid(row=0, column=2)
+    input_browse_btn.grid(row=row, column=2)
 
-    ttk.Label(frame, text="Output video").grid(row=1, column=0, sticky="w", pady=4)
+    row += 1
+    ttk.Label(frame, text="Save as").grid(row=row, column=0, sticky="w", pady=4)
     output_entry = ttk.Entry(frame, textvariable=output_var)
-    output_entry.grid(row=1, column=1, sticky="ew", padx=8)
+    output_entry.grid(row=row, column=1, sticky="ew", padx=8)
     output_browse_btn = ttk.Button(frame, text="Browse", command=choose_output)
-    output_browse_btn.grid(row=1, column=2)
+    output_browse_btn.grid(row=row, column=2)
 
-    ttk.Label(frame, text="Codec").grid(row=2, column=0, sticky="w", pady=4)
+    row += 1
+    ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
+
+    # --- AI upscale slider ---
+    row += 1
+    ttk.Label(frame, text="AI upscale").grid(row=row, column=0, sticky="w", pady=4)
+    scale_frame = ttk.Frame(frame)
+    scale_frame.grid(row=row, column=1, sticky="ew", padx=8)
+    scale_frame.columnconfigure(0, weight=1)
+    ai_scale_slider = ttk.Scale(scale_frame, from_=1, to=4, variable=ai_scale_var, orient="horizontal", command=on_scale_change)
+    ai_scale_slider.grid(row=0, column=0, sticky="ew")
+    ttk.Label(scale_frame, textvariable=ai_scale_label_var, width=4, anchor="e").grid(row=0, column=1, padx=(8, 0))
+    Tooltip(ai_scale_slider, "Off: no AI upscaling.\n2x/3x/4x: Real-ESRGAN upscale factor.\nOutput resolution = input × scale.")
+
+    # --- AI model (visible only when scale > 1) ---
+    row += 1
+    model_label = ttk.Label(frame, text="AI model")
+    model_label.grid(row=row, column=0, sticky="w", pady=4)
+    model_combo = ttk.Combobox(
+        frame, textvariable=model_var,
+        values=tuple(models.keys()), state="disabled", width=16,
+    )
+    model_combo.grid(row=row, column=1, sticky="w", padx=8)
+    model_label.grid_remove()
+    model_combo.grid_remove()
+    Tooltip(model_combo, "General: best for live action and photos.\nAnimation: optimized for animated video.\nAnime: tuned for anime art style.\nFast: lighter model, quicker but lower quality.")
+
+    # --- Options ---
+    row += 1
+    options_frame = ttk.Frame(frame)
+    options_frame.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
+    enhance_check = ttk.Checkbutton(options_frame, text="Enhance", variable=enhance_var, command=update_default_output)
+    enhance_check.pack(side="left", padx=(0, 16))
+    Tooltip(enhance_check, "Deblock, denoise, and CAS sharpen.\nFor AI upscale, applied as a pre-filter.")
+    interp60_check = ttk.Checkbutton(options_frame, text="60 fps", variable=interp60_var, command=update_default_output)
+    interp60_check.pack(side="left")
+    Tooltip(interp60_check, "RIFE GPU interpolation to exact 60 fps.")
+
+    row += 1
+    ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
+
+    # --- Encoding ---
+    row += 1
+    ttk.Label(frame, text="Codec").grid(row=row, column=0, sticky="w", pady=4)
     codec_frame = ttk.Frame(frame)
-    codec_frame.grid(row=2, column=1, sticky="w", padx=8)
+    codec_frame.grid(row=row, column=1, sticky="w", padx=8)
     codec_radios = [
-        ttk.Radiobutton(codec_frame, text="H.264 NVENC", value="h264", variable=codec_var),
-        ttk.Radiobutton(codec_frame, text="HEVC NVENC", value="hevc", variable=codec_var),
+        ttk.Radiobutton(codec_frame, text="H.264", value="h264", variable=codec_var),
+        ttk.Radiobutton(codec_frame, text="HEVC", value="hevc", variable=codec_var),
     ]
     codec_radios[0].pack(side="left")
     codec_radios[1].pack(side="left", padx=16)
 
-    ttk.Label(frame, text="Workflow").grid(row=3, column=0, sticky="w", pady=4)
-    workflow_combo = ttk.Combobox(frame, textvariable=workflow_var, values=tuple(workflows.keys()), state="readonly")
-    workflow_combo.grid(row=3, column=1, sticky="ew", padx=8)
-    workflow_combo.bind("<<ComboboxSelected>>", update_workflow_controls)
-    Tooltip(
-        workflow_combo,
-        "Enhance: FFmpeg deblock/denoise/sharpen filters.\n"
-        "AI upscale 2x: Real-ESRGAN 2x upscale from any input resolution.\n"
-        "Interpolate to 60 fps: RIFE frame interpolation, preserves resolution.",
-    )
+    row += 1
+    ttk.Label(frame, text="Quality").grid(row=row, column=0, sticky="w", pady=4)
+    quality_frame = ttk.Frame(frame)
+    quality_frame.grid(row=row, column=1, sticky="ew", padx=8)
+    quality_frame.columnconfigure(0, weight=1)
+    quality_scale = ttk.Scale(quality_frame, from_=14, to=28, variable=quality_var, orient="horizontal", command=on_quality_change)
+    quality_scale.grid(row=0, column=0, sticky="ew")
+    ttk.Label(quality_frame, textvariable=quality_var, width=3, anchor="e").grid(row=0, column=1, padx=(8, 0))
+    Tooltip(quality_scale, "NVENC constant quality. Lower = better quality, larger file.\n14 = near-lossless, 19 = balanced, 28 = small file.")
 
-    ttk.Label(frame, textvariable=tool_status_var, foreground="gray").grid(
-        row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4)
-    )
-
-    ttk.Label(frame, text="AI model").grid(row=5, column=0, sticky="w", pady=4)
-    model_combo = ttk.Combobox(
-        frame,
-        textvariable=model_var,
-        values=("realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"),
-        state="disabled",
-    )
-    model_combo.grid(row=5, column=1, sticky="ew", padx=8)
-
-    ttk.Label(frame, text="Quality").grid(row=6, column=0, sticky="w", pady=4)
-    quality_scale = ttk.Scale(frame, from_=14, to=28, variable=quality_var, orient="horizontal")
-    quality_scale.grid(row=6, column=1, sticky="ew", padx=8)
-    ttk.Label(frame, textvariable=quality_var, width=4).grid(row=6, column=2, sticky="w")
-
-    enhance_check = ttk.Checkbutton(
-        frame, text="Enhance (deblock/denoise/sharpen)", variable=enhance_var, command=update_default_output
-    )
-    enhance_check.grid(row=7, column=1, sticky="w", padx=8, pady=4)
-    Tooltip(
-        enhance_check,
-        "Apply deblocking, denoising, and CAS sharpening.\n"
-        "For AI workflows, applies deblock/denoise as a pre-filter before upscaling.",
-    )
-
-    interp60_check = ttk.Checkbutton(
-        frame, text="Interpolate to 60 fps", variable=interp60_var, command=update_default_output
-    )
-    interp60_check.grid(row=8, column=1, sticky="w", padx=8, pady=4)
-    Tooltip(
-        interp60_check,
-        "Uses RIFE on the GPU to produce exact 60 fps. "
-        "The app extracts frames, runs rife-ncnn-vulkan, then reassembles with NVENC.",
-    )
-
-    overwrite_check = ttk.Checkbutton(frame, text="Overwrite output if it exists", variable=overwrite_var)
-    overwrite_check.grid(row=9, column=1, sticky="w", padx=8, pady=4)
-
+    # --- Action + progress ---
+    row += 1
     btn_frame = ttk.Frame(frame)
-    btn_frame.grid(row=10, column=0, columnspan=3, sticky="w", padx=8, pady=10)
+    btn_frame.grid(row=row, column=0, columnspan=3, sticky="w", pady=(12, 0))
     start_button = ttk.Button(btn_frame, text="Process video", command=start)
     start_button.grid(row=0, column=0)
     cancel_button = ttk.Button(btn_frame, text="Cancel", command=cancel_job)
@@ -470,19 +461,27 @@ def launch_gui() -> None:
     reveal_button.grid(row=0, column=1, padx=(12, 0))
     reveal_button.grid_remove()
 
+    row += 1
     progress_bar = ttk.Progressbar(frame, variable=progress_var, maximum=100, mode="determinate")
-    progress_bar.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(4, 2))
+    progress_bar.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 2))
 
+    row += 1
     status_frame = ttk.Frame(frame)
-    status_frame.grid(row=12, column=0, columnspan=3, sticky="ew")
+    status_frame.grid(row=row, column=0, columnspan=3, sticky="ew")
     ttk.Label(status_frame, textvariable=progress_text_var).pack(side="left")
     ttk.Label(status_frame, textvariable=elapsed_var, foreground="gray").pack(side="left")
 
-    log_box = tk.Text(frame, height=10, state="disabled", wrap="word")
-    log_box.grid(row=13, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+    row += 1
+    frame.rowconfigure(row, weight=1)
+    log_box = tk.Text(frame, height=8, state="disabled", wrap="word")
+    log_box.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+
+    # --- Status bar ---
+    tool_bar = ttk.Label(root, textvariable=tool_status_var, foreground="gray", padding=(16, 4))
+    tool_bar.pack(side="bottom", fill="x")
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     load_settings()
-    update_workflow_controls()
+    on_scale_change(str(ai_scale_var.get()))
     drain_messages()
     root.mainloop()

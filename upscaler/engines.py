@@ -178,6 +178,7 @@ def run_ai_upscale(
     input_path: Path,
     output_path: Path,
     model: str,
+    scale: int,
     codec: str,
     quality: int,
     overwrite: bool,
@@ -190,7 +191,8 @@ def run_ai_upscale(
 ) -> int:
     assert tools.realesrgan is not None
     exe = Path(tools.realesrgan)
-    model = select_two_x_model(model, log)
+    if scale <= 3:
+        model = select_two_x_model(model, log)
     temp_path = output_path.parent / f"{output_path.stem}_work_{uuid.uuid4().hex[:8]}"
     success = False
     try:
@@ -228,7 +230,7 @@ def run_ai_upscale(
             return 1
         log(f"Extracted {total_frames} frames.")
 
-        log("Running Real-ESRGAN AI upscaling at 2x.")
+        log(f"Running Real-ESRGAN AI upscaling at {scale}x.")
         ai_cmd = [
             str(exe),
             "-i",
@@ -238,7 +240,7 @@ def run_ai_upscale(
             "-n",
             model,
             "-s",
-            "2",
+            str(scale),
             "-g",
             "0",
             "-t",
@@ -328,6 +330,7 @@ def upscale(
     output_file: str | None = None,
     engine: str = "ffmpeg",
     model: str = AI_2X_MODEL,
+    scale: int = 2,
     codec: str = "h264",
     quality: int = 19,
     overwrite: bool = False,
@@ -355,7 +358,7 @@ def upscale(
     if engine == "interp60":
         suffix = "60fps"
     elif engine == "ai":
-        suffix = "ai2x"
+        suffix = f"ai{scale}x"
         if target_width and target_height:
             suffix += f"_{target_height}p"
     elif enhance:
@@ -413,6 +416,7 @@ def upscale(
             input_path,
             spatial_output_path,
             model,
+            scale,
             codec,
             quality,
             overwrite if spatial_output_path == output_path else True,
