@@ -23,8 +23,6 @@ from upscaler.process import (
 )
 from upscaler.tools import ToolInfo, inspect_tools
 
-CHUNK_SIZE = 500
-
 
 def run_rife_interpolation(
     tools: ToolInfo,
@@ -225,48 +223,22 @@ def run_ai_upscale(
             return 1
         log(f"Extracted {total_frames} frames.")
 
-        # Step 2: ESRGAN in batches — process CHUNK_SIZE frames at a time,
-        # delete each batch of input frames after processing to save disk.
         log(f"Running Real-ESRGAN AI upscaling at {scale}x.")
-        all_frames = sorted(frames_dir.iterdir())
-        processed = 0
+        ai_cmd = _build_esrgan_cmd(exe, frames_dir, ai_dir, model, scale)
+        code = stream_command_with_frame_progress(
+            ai_cmd, log, ai_dir, total_frames, progress,
+            phase="Step 2/3 – AI upscaling",
+            cwd=str(exe.parent),
+        )
+        if code != 0:
+            return code
 
-        for batch_start in range(0, len(all_frames), CHUNK_SIZE):
-            batch_files = all_frames[batch_start:batch_start + CHUNK_SIZE]
-            batch_num = batch_start // CHUNK_SIZE + 1
+        shutil.rmtree(frames_dir, ignore_errors=True)
 
-            batch_in = temp_path / f"batch_{batch_num}_in"
-            batch_out = temp_path / f"batch_{batch_num}_out"
-            batch_in.mkdir()
-            batch_out.mkdir()
-
-            for i, f in enumerate(batch_files, 1):
-                f.rename(batch_in / f"frame_{i:08d}.jpg")
-
-            ai_cmd = _build_esrgan_cmd(exe, batch_in, batch_out, model, scale)
-            code = stream_command_with_frame_progress(
-                ai_cmd, log, batch_out, len(batch_files), progress,
-                phase=f"Step 2/3 – AI upscaling ({processed}/{total_frames})",
-                cwd=str(exe.parent),
-            )
-
-            shutil.rmtree(batch_in, ignore_errors=True)
-
-            if code != 0:
-                return code
-
-            for f in sorted(batch_out.iterdir()):
-                if f.is_file():
-                    processed += 1
-                    f.rename(ai_dir / f"frame_{processed:08d}.jpg")
-            shutil.rmtree(batch_out, ignore_errors=True)
-
+        processed = count_image_files(ai_dir)
         if processed < total_frames:
             log(f"Expected {total_frames} AI frames, got {processed}.")
             return 1
-
-        # Clean up extracted frames dir (should be empty after moves).
-        shutil.rmtree(frames_dir, ignore_errors=True)
 
         # Step 3: Reassemble.
         return _assemble_video(
