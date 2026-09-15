@@ -1,2 +1,2 @@
 Set-Location $PSScriptRoot
-uv run python upscaler.py @args
+uv run python -m upscaler @args

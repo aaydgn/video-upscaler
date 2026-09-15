@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import argparse
+import sys
+
+from upscaler.config import AI_2X_MODEL
+from upscaler.engines import upscale
+from upscaler.tools import inspect_tools
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Upscale, enhance, or interpolate video with FFmpeg and NVIDIA encoding.")
+    parser.add_argument("input", nargs="?", help="Input video path. Omit to launch the GUI.")
+    parser.add_argument("-o", "--output", help="Output video path.")
+    parser.add_argument(
+        "--engine",
+        choices=["ffmpeg", "ai", "interp60"],
+        default="ffmpeg",
+        help="FFmpeg encode/enhance, AI 2x upscale, or standalone 60 fps interpolation.",
+    )
+    parser.add_argument(
+        "--model",
+        choices=["realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"],
+        default=AI_2X_MODEL,
+        help="Real-ESRGAN model.",
+    )
+    parser.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="NVENC codec.")
+    parser.add_argument("--quality", type=int, default=19, help="NVENC CQ value, lower is larger/better.")
+    parser.add_argument("--enhance", action=argparse.BooleanOptionalAction, default=True, help="Apply deblock/denoise/sharpen filters (default: on).")
+    parser.add_argument("--interp60", action="store_true", help="Interpolate the final output to exact 60 fps.")
+    parser.add_argument("--target", help="Target output resolution, e.g. 1920x1080. Downscales after processing.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite the output file if it exists.")
+    parser.add_argument("--check", action="store_true", help="Check FFmpeg/NVIDIA capabilities and exit.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv or sys.argv[1:])
+    if args.check:
+        try:
+            tools = inspect_tools()
+        except Exception as exc:
+            print(f"Setup check failed: {exc}", file=sys.stderr)
+            return 1
+        print(f"FFmpeg: {tools.ffmpeg}")
+        print(f"ffprobe: {tools.ffprobe}")
+        print(f"scale_cuda: {'yes' if tools.has_cuda_scale else 'no'}")
+        print(f"scale_npp: {'yes' if tools.has_npp_scale else 'no'}")
+        print(f"cas: {'yes' if tools.has_cas else 'no'}")
+        print(f"deblock: {'yes' if tools.has_deblock else 'no'}")
+        print(f"hqdn3d: {'yes' if tools.has_hqdn3d else 'no'}")
+        print(f"h264_nvenc: {'yes' if tools.has_h264_nvenc else 'no'}")
+        print(f"hevc_nvenc: {'yes' if tools.has_hevc_nvenc else 'no'}")
+        print(f"realesrgan: {tools.realesrgan or 'not found'}")
+        print(f"rife: {tools.rife or 'not found'}")
+        return 0
+    if not args.input:
+        from upscaler.gui import launch_gui
+
+        launch_gui()
+        return 0
+    try:
+        return upscale(
+            args.input,
+            args.output,
+            args.engine,
+            args.model,
+            args.codec,
+            args.quality,
+            args.overwrite,
+            args.enhance,
+            args.interp60,
+            args.target,
+        )
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1

@@ -1,0 +1,485 @@
+from __future__ import annotations
+
+import shutil
+import uuid
+from pathlib import Path
+from typing import Callable
+
+from upscaler.config import AI_2X_MODEL, INTERPOLATE_FPS, ProgressCallback
+from upscaler.ffmpeg import (
+    build_ffmpeg_command,
+    build_stream_copy_command,
+    make_work_video_path,
+    probe_video,
+    select_two_x_model,
+    select_video_encoder,
+    should_interpolate_to_60,
+)
+from upscaler.process import (
+    count_image_files,
+    report_progress,
+    stream_command,
+    stream_command_with_frame_progress,
+)
+from upscaler.tools import ToolInfo, inspect_tools
+
+
+def run_rife_interpolation(
+    tools: ToolInfo,
+    input_path: Path,
+    output_path: Path,
+    codec: str,
+    quality: int,
+    overwrite: bool,
+    fps: float | None,
+    log: Callable[[str], None],
+    progress: ProgressCallback | None,
+) -> int:
+    if not tools.rife:
+        raise RuntimeError(
+            "RIFE was not found. Install rife-ncnn-vulkan to C:\\Tools\\rife-ncnn-vulkan "
+            "or add rife-ncnn-vulkan.exe to PATH."
+        )
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output_path}")
+    if fps is None:
+        _width, _height, _duration, fps = probe_video(tools.ffprobe, input_path)
+    if fps is None:
+        fps = 30.0
+        log("Warning: could not detect frame rate for RIFE; using 30 fps for frame-count math.")
+
+    temp_path = output_path.parent / f"{output_path.stem}_rife_work_{uuid.uuid4().hex[:8]}"
+    success = False
+    try:
+        temp_path.mkdir(parents=True, exist_ok=False)
+        frames_dir = temp_path / "frames"
+        rife_dir = temp_path / "rife_frames"
+        frames_dir.mkdir()
+        rife_dir.mkdir()
+
+        report_progress("Step 1/3 – Extracting frames", None, None, log, progress)
+        extract_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(input_path),
+            str(frames_dir / "frame_%08d.png"),
+        ]
+        code = stream_command(extract_cmd, log)
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+
+        total_frames = count_image_files(frames_dir)
+        if total_frames <= 0:
+            log(f"No extracted frames found. Work folder preserved for inspection: {temp_path}")
+            return 1
+        target_frames = max(total_frames, round(total_frames * INTERPOLATE_FPS / fps))
+        log(f"RIFE target: {total_frames} frames at {fps:.3f} fps -> {target_frames} frames at 60 fps.")
+
+        width, height, _duration, _probed_fps = probe_video(tools.ffprobe, input_path)
+        rife_cmd = [
+            tools.rife,
+            "-i",
+            str(frames_dir),
+            "-o",
+            str(rife_dir),
+            "-m",
+            "rife-v4",
+            "-n",
+            str(target_frames),
+            "-g",
+            "0",
+            "-j",
+            "2:2:2",
+            "-f",
+            "frame_%08d.png",
+        ]
+        if width and height and (width >= 3840 or height >= 2160):
+            rife_cmd.append("-u")
+
+        code = stream_command_with_frame_progress(
+            rife_cmd,
+            log,
+            rife_dir,
+            target_frames,
+            progress,
+            phase="Step 2/3 – Interpolating with RIFE",
+            log_prefix="RIFE",
+            cwd=str(Path(tools.rife).parent),
+        )
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+
+        processed_frames = count_image_files(rife_dir)
+        if processed_frames < target_frames:
+            log(f"Expected {target_frames} RIFE frames, found {processed_frames}.")
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return 1
+
+        video_encoder = select_video_encoder(tools, codec)
+        report_progress("Step 3/3 – Reassembling 60 fps video", None, None, log, progress)
+        assemble_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-stats",
+            "-y" if overwrite else "-n",
+            "-framerate",
+            f"{INTERPOLATE_FPS:.6f}",
+            "-start_number",
+            "0",
+            "-i",
+            str(rife_dir / "frame_%08d.png"),
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a?",
+            "-map",
+            "1:s?",
+            "-c:v",
+            video_encoder,
+            "-preset",
+            "p6" if video_encoder.endswith("_nvenc") else "slow",
+            "-cq",
+            str(quality),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        code = stream_command(assemble_cmd, log)
+        success = code == 0
+        if not success:
+            log(f"Work folder preserved for inspection: {temp_path}")
+        return code
+    finally:
+        if success:
+            try:
+                if temp_path.exists():
+                    shutil.rmtree(temp_path)
+            except OSError as exc:
+                log(f"Warning: could not remove work folder {temp_path}: {exc}")
+
+
+def run_ai_upscale(
+    tools: ToolInfo,
+    input_path: Path,
+    output_path: Path,
+    model: str,
+    codec: str,
+    quality: int,
+    overwrite: bool,
+    enhance: bool,
+    fps: float,
+    target_width: int | None,
+    target_height: int | None,
+    log: Callable[[str], None],
+    progress: ProgressCallback | None,
+) -> int:
+    assert tools.realesrgan is not None
+    exe = Path(tools.realesrgan)
+    model = select_two_x_model(model, log)
+    temp_path = output_path.parent / f"{output_path.stem}_work_{uuid.uuid4().hex[:8]}"
+    success = False
+    try:
+        temp_path.mkdir(parents=True, exist_ok=False)
+        frames_dir = temp_path / "frames"
+        ai_dir = temp_path / "ai_frames"
+        frames_dir.mkdir()
+        ai_dir.mkdir()
+
+        report_progress("Step 1/3 – Extracting frames", None, None, log, progress)
+        extract_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-y",
+            "-i",
+            str(input_path),
+        ]
+        if enhance:
+            pre_filters = []
+            if tools.has_deblock:
+                pre_filters.append("deblock=filter=weak:block=8")
+            if tools.has_hqdn3d:
+                pre_filters.append("hqdn3d=1.2:1.2:4:4")
+            if pre_filters:
+                extract_cmd.extend(["-vf", ",".join(pre_filters)])
+        extract_cmd.append(str(frames_dir / "frame_%08d.png"))
+        code = stream_command(extract_cmd, log)
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+
+        total_frames = count_image_files(frames_dir)
+        if total_frames <= 0:
+            log(f"No extracted frames found. Work folder preserved: {temp_path}")
+            return 1
+        log(f"Extracted {total_frames} frames.")
+
+        log("Running Real-ESRGAN AI upscaling at 2x.")
+        ai_cmd = [
+            str(exe),
+            "-i",
+            str(frames_dir),
+            "-o",
+            str(ai_dir),
+            "-n",
+            model,
+            "-s",
+            "2",
+            "-g",
+            "0",
+            "-t",
+            "512",
+            "-j",
+            "1:1:1",
+            "-f",
+            "png",
+        ]
+        code = stream_command_with_frame_progress(
+            ai_cmd,
+            log,
+            ai_dir,
+            total_frames,
+            progress,
+            phase="Step 2/3 – AI upscaling",
+            cwd=str(exe.parent),
+        )
+        if code != 0:
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return code
+
+        processed_frames = count_image_files(ai_dir)
+        if processed_frames < total_frames:
+            log(f"Expected {total_frames} AI frames, found {processed_frames}.")
+            log(f"Work folder preserved for inspection: {temp_path}")
+            return 1
+
+        video_encoder = select_video_encoder(tools, codec)
+        report_progress("Step 3/3 – Reassembling video", None, None, log, progress)
+        assemble_cmd = [
+            tools.ffmpeg,
+            "-hide_banner",
+            "-stats",
+            "-y" if overwrite else "-n",
+            "-framerate",
+            f"{fps:.6f}",
+            "-i",
+            str(ai_dir / "frame_%08d.png"),
+            "-i",
+            str(input_path),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a?",
+            "-map",
+            "1:s?",
+        ]
+        if target_width and target_height:
+            assemble_cmd.extend(["-vf", f"scale={target_width}:{target_height}:flags=lanczos"])
+        assemble_cmd.extend([
+            "-c:v",
+            video_encoder,
+            "-preset",
+            "p6" if video_encoder.endswith("_nvenc") else "slow",
+            "-cq",
+            str(quality),
+            "-b:v",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-c:s",
+            "copy",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ])
+        code = stream_command(assemble_cmd, log)
+        success = code == 0
+        if not success:
+            log(f"Work folder preserved for inspection: {temp_path}")
+        return code
+    finally:
+        if success:
+            try:
+                if temp_path.exists():
+                    shutil.rmtree(temp_path)
+            except OSError as exc:
+                log(f"Warning: could not remove work folder {temp_path}: {exc}")
+
+
+def upscale(
+    input_file: str,
+    output_file: str | None = None,
+    engine: str = "ffmpeg",
+    model: str = AI_2X_MODEL,
+    codec: str = "h264",
+    quality: int = 19,
+    overwrite: bool = False,
+    enhance: bool = True,
+    interp60: bool = False,
+    target: str | None = None,
+    log: Callable[[str], None] = print,
+    progress: ProgressCallback | None = None,
+) -> int:
+    input_path = Path(input_file).expanduser().resolve()
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input video does not exist: {input_path}")
+
+    target_width: int | None = None
+    target_height: int | None = None
+    if target:
+        parts = target.lower().split("x")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid target resolution: {target}. Use WxH format, e.g. 1920x1080.")
+        try:
+            target_width, target_height = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(f"Invalid target resolution: {target}. Use WxH format, e.g. 1920x1080.")
+
+    if engine == "interp60":
+        suffix = "60fps"
+    elif engine == "ai":
+        suffix = "ai2x"
+        if target_width and target_height:
+            suffix += f"_{target_height}p"
+    elif enhance:
+        suffix = "enhanced"
+    else:
+        suffix = "encoded"
+    if interp60 and engine != "interp60":
+        suffix += "_60fps"
+
+    output_path = (
+        Path(output_file).expanduser().resolve()
+        if output_file
+        else input_path.with_name(f"{input_path.stem}_{suffix}.mp4")
+    )
+    tools = inspect_tools()
+    width, height, duration, fps = probe_video(tools.ffprobe, input_path)
+    apply_interp60 = should_interpolate_to_60(interp60 or engine == "interp60", fps, log)
+    spatial_output_path = make_work_video_path(output_path, "pre60") if apply_interp60 and engine != "interp60" else output_path
+
+    if width and height:
+        log(f"Input: {width}x{height}")
+    if duration:
+        log(f"Duration: {duration:.1f}s")
+    log(f"FFmpeg: {tools.ffmpeg}")
+    if tools.realesrgan:
+        log(f"Real-ESRGAN: {tools.realesrgan}")
+    if tools.rife:
+        log(f"RIFE: {tools.rife}")
+    log(
+        "Acceleration: "
+        + (
+            "CUDA scale"
+            if tools.has_cuda_scale
+            else "NPP scale"
+            if tools.has_npp_scale
+            else "CPU scale with NVENC encode"
+        )
+    )
+
+    if interp60 or engine == "interp60":
+        if not tools.rife:
+            raise RuntimeError(
+                "RIFE was not found. Install rife-ncnn-vulkan to C:\\Tools\\rife-ncnn-vulkan "
+                "or add rife-ncnn-vulkan.exe to PATH."
+            )
+
+    if engine == "ai":
+        if not tools.realesrgan:
+            raise RuntimeError("Real-ESRGAN was not found. Install realesrgan-ncnn-vulkan.")
+        if not fps:
+            fps = 30.0
+            log("Warning: could not detect frame rate; using 30 fps.")
+        return_code = run_ai_upscale(
+            tools,
+            input_path,
+            spatial_output_path,
+            model,
+            codec,
+            quality,
+            overwrite if spatial_output_path == output_path else True,
+            enhance,
+            fps,
+            target_width,
+            target_height,
+            log,
+            progress,
+        )
+    elif engine == "interp60":
+        if apply_interp60:
+            return_code = run_rife_interpolation(
+                tools,
+                input_path,
+                output_path,
+                codec,
+                quality,
+                overwrite,
+                fps,
+                log,
+                progress,
+            )
+        else:
+            log("Input is already 60 fps. Copying streams.")
+            report_progress("Copying existing 60 fps video", None, None, log, progress)
+            return_code = stream_command(build_stream_copy_command(tools, input_path, output_path, overwrite), log)
+    else:
+        cmd = build_ffmpeg_command(
+            tools,
+            input_path,
+            spatial_output_path,
+            codec,
+            quality,
+            overwrite if spatial_output_path == output_path else True,
+            enhance=enhance,
+            target_width=target_width,
+            target_height=target_height,
+        )
+        log("Running FFmpeg" + (" enhance pass:" if enhance else ":"))
+        report_progress("Processing video", None, None, log, progress)
+        return_code = stream_command(cmd, log)
+
+    if apply_interp60 and engine != "interp60":
+        try:
+            if return_code == 0:
+                return_code = run_rife_interpolation(
+                    tools,
+                    spatial_output_path,
+                    output_path,
+                    codec,
+                    quality,
+                    overwrite,
+                    fps,
+                    log,
+                    progress,
+                )
+        finally:
+            try:
+                if spatial_output_path != output_path and spatial_output_path.exists():
+                    spatial_output_path.unlink()
+            except OSError as exc:
+                log(f"Warning: could not remove intermediate video {spatial_output_path}: {exc}")
+
+    if return_code == 0:
+        report_progress("Done", None, None, log, progress)
+        log(f"Done: {output_path}")
+    else:
+        log(f"Upscale failed with exit code {return_code}")
+    return return_code
