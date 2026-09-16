@@ -142,7 +142,7 @@ def launch_gui() -> None:
         val = round(float(_value))
         ai_scale_var.set(val)
         ai_scale_label_var.set(scale_labels[val])
-        if val > 1:
+        if val >= 4:
             model_label.grid()
             model_combo.grid()
             model_combo.configure(state="readonly")
@@ -203,7 +203,7 @@ def launch_gui() -> None:
         input_browse_btn.configure(state=state)
         output_browse_btn.configure(state=state)
         ai_scale_slider.configure(state=state)
-        model_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
+        model_combo.configure(state="readonly" if enabled and ai_scale_var.get() >= 4 else "disabled")
         for rb in codec_radios:
             rb.configure(state=state)
         quality_scale.configure(state=state)
