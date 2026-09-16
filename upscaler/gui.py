@@ -163,7 +163,7 @@ def launch_gui() -> None:
             model_combo.grid_remove()
             model_combo.configure(state="disabled")
             return
-        if _is_onnx_backend() and val >= 4:
+        if _is_onnx_backend():
             _refresh_onnx_models()
             model_combo.configure(values=tuple(_onnx_models.keys()))
             if model_var.get() not in _onnx_models:
@@ -172,7 +172,7 @@ def launch_gui() -> None:
             model_label.grid()
             model_combo.grid()
             model_combo.configure(state="readonly")
-        elif not _is_onnx_backend() and val >= 4:
+        elif val >= 4:
             model_combo.configure(values=tuple(ncnn_models.keys()))
             if model_var.get() not in ncnn_models:
                 model_var.set("Animation")
