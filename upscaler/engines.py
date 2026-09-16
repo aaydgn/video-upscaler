@@ -17,7 +17,6 @@ from upscaler.ffmpeg import (
 )
 from upscaler.models import DEFAULT_ONNX_MODEL, default_for_scale, ensure_model
 from upscaler.pipeline import run_onnx_pipeline
-from upscaler.seedvr2 import find_seedvr2, run_seedvr2
 from upscaler.process import (
     count_image_files,
     report_progress,
@@ -403,30 +402,12 @@ def upscale(
                 "or add rife-ncnn-vulkan.exe to PATH."
             )
 
-    use_seedvr2 = engine == "ai" and backend == "seedvr2"
     use_onnx = (
         engine == "ai"
-        and not use_seedvr2
         and (backend == "onnx" or (backend == "auto" and not tools.realesrgan))
     )
 
-    if engine == "ai" and use_seedvr2:
-        if not find_seedvr2():
-            raise RuntimeError(
-                "SeedVR2 is not installed. Run:\n"
-                "  python scripts/setup_seedvr2.py"
-            )
-        out_h = height * scale if height else 1080
-        log(f"Backend: SeedVR2 (target {out_h}p)")
-        return_code = run_seedvr2(
-            input_path,
-            spatial_output_path,
-            resolution=out_h,
-            overwrite=overwrite if spatial_output_path == output_path else True,
-            log=log,
-            progress=progress,
-        )
-    elif engine == "ai" and use_onnx:
+    if engine == "ai" and use_onnx:
         if not fps:
             fps = 30.0
             log("Warning: could not detect frame rate; using 30 fps.")
