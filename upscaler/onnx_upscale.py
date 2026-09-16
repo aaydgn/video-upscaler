@@ -32,11 +32,16 @@ def create_session(
 
     opts = ort.SessionOptions()
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.enable_mem_pattern = False
+
+    provider_opts: list[dict] = [{}]
+    if provider == "DmlExecutionProvider":
+        provider_opts = [{"performance_preference": "high_performance"}]
 
     session = ort.InferenceSession(
         str(model_path),
         sess_options=opts,
-        providers=[provider, "CPUExecutionProvider"],
+        providers=[(provider, provider_opts[0]), "CPUExecutionProvider"],
     )
     actual = session.get_providers()
     log(f"Active providers: {actual}")
@@ -51,13 +56,21 @@ def detect_scale(session: object, test_h: int = 64, test_w: int = 64) -> int:
     return result.shape[2] // test_h
 
 
+def _use_fp16(session: object) -> bool:
+    in_type = session.get_inputs()[0].type
+    return "float16" in in_type
+
+
 def _infer(session: object, frame: np.ndarray) -> np.ndarray:
     in_meta = session.get_inputs()[0]
     out_name = session.get_outputs()[0].name
 
-    tensor = frame.astype(np.float32) / 255.0
+    tensor = (frame.astype(np.float32) / 255.0)
     tensor = np.transpose(tensor, (2, 0, 1))
     tensor = np.expand_dims(tensor, axis=0)
+
+    if _use_fp16(session):
+        tensor = tensor.astype(np.float16)
 
     result = session.run([out_name], {in_meta.name: tensor})[0]
     return np.clip(
