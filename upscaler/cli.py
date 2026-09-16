@@ -5,6 +5,7 @@ import sys
 
 from upscaler.config import AI_2X_MODEL
 from upscaler.engines import upscale
+from upscaler.models import DEFAULT_ONNX_MODEL
 from upscaler.tools import inspect_tools
 
 
@@ -24,6 +25,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--enhance", action=argparse.BooleanOptionalAction, default=True, help="Apply deblock/denoise/sharpen filters (default: on).")
     parser.add_argument("--interp60", action="store_true", help="Interpolate the final output to exact 60 fps.")
     parser.add_argument("--target", help="Target output resolution, e.g. 1920x1080. Downscales after processing.")
+    parser.add_argument("--backend", choices=["auto", "onnx", "ncnn"], default="auto", help="AI upscale backend: onnx (in-process, no disk I/O), ncnn (realesrgan-ncnn-vulkan), auto (onnx if available, else ncnn).")
+    parser.add_argument("--onnx-model", default=DEFAULT_ONNX_MODEL, help="ONNX model name or path to .onnx file.")
+    parser.add_argument("--tile-size", type=int, default=0, help="ONNX tile size (0 = whole frame, e.g. 512 for low VRAM).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output file if it exists.")
     parser.add_argument("--check", action="store_true", help="Check FFmpeg/NVIDIA capabilities and exit.")
     return parser.parse_args(argv)
@@ -48,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"hevc_nvenc: {'yes' if tools.has_hevc_nvenc else 'no'}")
         print(f"realesrgan: {tools.realesrgan or 'not found'}")
         print(f"rife: {tools.rife or 'not found'}")
+        try:
+            import onnxruntime as ort
+            print(f"onnxruntime: {ort.__version__}")
+            print(f"onnx_providers: {', '.join(ort.get_available_providers())}")
+        except ImportError:
+            print("onnxruntime: not installed")
         return 0
     if not args.input:
         from upscaler.gui import launch_gui
@@ -69,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
             args.enhance,
             args.interp60,
             args.target,
+            backend=args.backend,
+            onnx_model=args.onnx_model,
+            tile_size=args.tile_size,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

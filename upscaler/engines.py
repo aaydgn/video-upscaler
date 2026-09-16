@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from upscaler.config import AI_2X_MODEL, INTERPOLATE_FPS, ProgressCallback
+from upscaler.config import AI_2X_MODEL, INTERPOLATE_FPS, ONNX_TILE_SIZE, ProgressCallback
 from upscaler.ffmpeg import (
     build_ffmpeg_command,
     build_stream_copy_command,
@@ -15,6 +15,8 @@ from upscaler.ffmpeg import (
     select_video_encoder,
     should_interpolate_to_60,
 )
+from upscaler.models import DEFAULT_ONNX_MODEL, ensure_model
+from upscaler.pipeline import run_onnx_pipeline
 from upscaler.process import (
     count_image_files,
     report_progress,
@@ -329,6 +331,9 @@ def upscale(
     enhance: bool = True,
     interp60: bool = False,
     target: str | None = None,
+    backend: str = "auto",
+    onnx_model: str = DEFAULT_ONNX_MODEL,
+    tile_size: int = ONNX_TILE_SIZE,
     log: Callable[[str], None] = print,
     progress: ProgressCallback | None = None,
 ) -> int:
@@ -397,12 +402,41 @@ def upscale(
                 "or add rife-ncnn-vulkan.exe to PATH."
             )
 
-    if engine == "ai":
+    use_onnx = (
+        engine == "ai"
+        and (backend == "onnx" or (backend == "auto" and not tools.realesrgan))
+    )
+
+    if engine == "ai" and use_onnx:
+        if not fps:
+            fps = 30.0
+            log("Warning: could not detect frame rate; using 30 fps.")
+        model_path = ensure_model(onnx_model, log)
+        log(f"Backend: ONNX ({model_path.name})")
+        return_code = run_onnx_pipeline(
+            tools,
+            input_path,
+            spatial_output_path,
+            model_path,
+            scale,
+            codec,
+            quality,
+            overwrite if spatial_output_path == output_path else True,
+            enhance,
+            fps,
+            target_width,
+            target_height,
+            tile_size,
+            log,
+            progress,
+        )
+    elif engine == "ai":
         if not tools.realesrgan:
             raise RuntimeError("Real-ESRGAN was not found. Install realesrgan-ncnn-vulkan.")
         if not fps:
             fps = 30.0
             log("Warning: could not detect frame rate; using 30 fps.")
+        log("Backend: ncnn (realesrgan-ncnn-vulkan)")
         return_code = run_ai_upscale(
             tools,
             input_path,

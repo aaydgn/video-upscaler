@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "NVIDIA/FFmpeg video upscaler with a Tkinter UI."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "numpy",
+    "onnxruntime-directml>=1.17",
+]
 
 [project.scripts]
 upscaler = "upscaler.cli:main"

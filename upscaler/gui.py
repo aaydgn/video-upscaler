@@ -9,6 +9,7 @@ from pathlib import Path
 
 from upscaler.config import AI_2X_MODEL
 from upscaler.engines import upscale
+from upscaler.models import DEFAULT_ONNX_MODEL
 from upscaler.process import active_subprocess
 from upscaler.tools import inspect_tools
 
@@ -27,6 +28,7 @@ def launch_gui() -> None:
     ai_scale_var = tk.IntVar(value=1)
     ai_scale_label_var = tk.StringVar(value="Off")
     model_var = tk.StringVar(value="Animation")
+    backend_var = tk.StringVar(value="Auto")
     codec_var = tk.StringVar(value="h264")
     quality_var = tk.IntVar(value=19)
     enhance_var = tk.BooleanVar(value=True)
@@ -44,6 +46,7 @@ def launch_gui() -> None:
         "Anime": "realesrgan-x4plus-anime",
         "Fast": "realesrnet-x4plus",
     }
+    backends = {"Auto": "auto", "ONNX (pipe)": "onnx", "ncnn (legacy)": "ncnn"}
 
     _job_start_time: list[float | None] = [None]
     _elapsed_after_id: list[str | None] = [None]
@@ -63,6 +66,8 @@ def launch_gui() -> None:
                 ai_scale_var.set(prefs["ai_scale"])
             if prefs.get("model") in models:
                 model_var.set(prefs["model"])
+            if prefs.get("backend") in backends:
+                backend_var.set(prefs["backend"])
             if isinstance(prefs.get("enhance"), bool):
                 enhance_var.set(prefs["enhance"])
             if isinstance(prefs.get("interp60"), bool):
@@ -77,6 +82,7 @@ def launch_gui() -> None:
                 "quality": quality_var.get(),
                 "ai_scale": ai_scale_var.get(),
                 "model": model_var.get(),
+                "backend": backend_var.get(),
                 "enhance": enhance_var.get(),
                 "interp60": interp60_var.get(),
             }
@@ -150,6 +156,14 @@ def launch_gui() -> None:
             model_label.grid_remove()
             model_combo.grid_remove()
             model_combo.configure(state="disabled")
+        if val > 1:
+            backend_label.grid()
+            backend_combo.grid()
+            backend_combo.configure(state="readonly")
+        else:
+            backend_label.grid_remove()
+            backend_combo.grid_remove()
+            backend_combo.configure(state="disabled")
         update_default_output()
 
     def on_quality_change(_value: str) -> None:
@@ -204,6 +218,7 @@ def launch_gui() -> None:
         output_browse_btn.configure(state=state)
         ai_scale_slider.configure(state=state)
         model_combo.configure(state="readonly" if enabled and ai_scale_var.get() >= 4 else "disabled")
+        backend_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
         for rb in codec_radios:
             rb.configure(state=state)
         quality_scale.configure(state=state)
@@ -307,6 +322,8 @@ def launch_gui() -> None:
         engine = "ai" if scale > 1 else "ffmpeg"
         model_key = model_var.get()
         model = models.get(model_key, AI_2X_MODEL)
+        backend_key = backend_var.get()
+        backend = backends.get(backend_key, "auto")
 
         _cancel_event.clear()
         set_controls_enabled(False)
@@ -337,8 +354,9 @@ def launch_gui() -> None:
                     enhance_var.get(),
                     interp60_var.get(),
                     None,
-                    messages.put,
-                    queue_progress,
+                    backend=backend,
+                    log=messages.put,
+                    progress=queue_progress,
                 )
                 success = code == 0
                 if not success and not _cancel_event.is_set():
@@ -360,6 +378,12 @@ def launch_gui() -> None:
             parts.append(f"NVENC {nvenc}" if nvenc else "NVENC ✗")
             parts.append("ESRGAN ✓" if tools.realesrgan else "ESRGAN ✗")
             parts.append("RIFE ✓" if tools.rife else "RIFE ✗")
+            try:
+                import onnxruntime as ort
+                from upscaler.onnx_upscale import select_provider
+                parts.append(f"ONNX ✓ ({select_provider().replace('ExecutionProvider', '')})")
+            except ImportError:
+                parts.append("ONNX ✗")
             messages.put(("tool_status", "  ·  ".join(parts)))
         except Exception as exc:
             messages.put(("tool_status", f"Tool check failed: {exc}"))
@@ -413,6 +437,19 @@ def launch_gui() -> None:
     model_label.grid_remove()
     model_combo.grid_remove()
     Tooltip(model_combo, "General: best for live action and photos.\nAnimation: optimized for animated video.\nAnime: tuned for anime art style.\nFast: lighter model, quicker but lower quality.")
+
+    # --- Backend ---
+    row += 1
+    backend_label = ttk.Label(frame, text="Backend")
+    backend_label.grid(row=row, column=0, sticky="w", pady=4)
+    backend_combo = ttk.Combobox(
+        frame, textvariable=backend_var,
+        values=tuple(backends.keys()), state="disabled", width=16,
+    )
+    backend_combo.grid(row=row, column=1, sticky="w", padx=8)
+    backend_label.grid_remove()
+    backend_combo.grid_remove()
+    Tooltip(backend_combo, "Auto: use ONNX if installed, else ncnn.\nONNX (pipe): in-process inference, zero disk I/O.\nncnn (legacy): realesrgan-ncnn-vulkan binary.")
 
     # --- Options ---
     row += 1
