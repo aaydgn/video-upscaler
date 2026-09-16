@@ -179,10 +179,12 @@ def launch_gui() -> None:
             if model_var.get() not in _onnx_models:
                 first = next(iter(_onnx_models), "")
                 model_var.set(first)
+            model_tip.text = _onnx_tip
         else:
             model_combo.configure(values=tuple(ncnn_models.keys()))
             if model_var.get() not in ncnn_models:
                 model_var.set("Animation")
+            model_tip.text = _ncnn_tip
         model_label.grid()
         model_combo.grid()
         model_combo.configure(state="readonly")
@@ -193,14 +195,6 @@ def launch_gui() -> None:
         val = _slider_to_scale.get(pos, 1)
         ai_scale_var.set(val)
         ai_scale_label_var.set(scale_labels.get(val, f"{val}x"))
-        if val > 1:
-            backend_label.grid()
-            backend_combo.grid()
-            backend_combo.configure(state="readonly")
-        else:
-            backend_label.grid_remove()
-            backend_combo.grid_remove()
-            backend_combo.configure(state="disabled")
         _sync_model_combo()
         update_default_output()
 
@@ -258,8 +252,8 @@ def launch_gui() -> None:
         input_browse_btn.configure(state=state)
         output_browse_btn.configure(state=state)
         ai_scale_slider.configure(state=state)
+        backend_combo.configure(state="readonly" if enabled else "disabled")
         model_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
-        backend_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
         for rb in codec_radios:
             rb.configure(state=state)
         quality_scale.configure(state=state)
@@ -457,6 +451,18 @@ def launch_gui() -> None:
     row += 1
     ttk.Separator(frame, orient="horizontal").grid(row=row, column=0, columnspan=3, sticky="ew", pady=8)
 
+    # --- Backend ---
+    row += 1
+    backend_label = ttk.Label(frame, text="Backend")
+    backend_label.grid(row=row, column=0, sticky="w", pady=4)
+    backend_combo = ttk.Combobox(
+        frame, textvariable=backend_var,
+        values=tuple(backends.keys()), state="readonly", width=16,
+    )
+    backend_combo.grid(row=row, column=1, sticky="w", padx=8)
+    backend_combo.bind("<<ComboboxSelected>>", on_backend_change)
+    Tooltip(backend_combo, "Auto: use ONNX if installed, else ncnn.\nONNX (pipe): in-process GPU inference, zero disk I/O.\nncnn (legacy): realesrgan-ncnn-vulkan binary.")
+
     # --- AI upscale slider ---
     row += 1
     ttk.Label(frame, text="AI upscale").grid(row=row, column=0, sticky="w", pady=4)
@@ -466,21 +472,7 @@ def launch_gui() -> None:
     ai_scale_slider = ttk.Scale(scale_frame, from_=0, to=2, variable=_slider_var, orient="horizontal", command=on_scale_change)
     ai_scale_slider.grid(row=0, column=0, sticky="ew")
     ttk.Label(scale_frame, textvariable=ai_scale_label_var, width=4, anchor="e").grid(row=0, column=1, padx=(8, 0))
-    Tooltip(ai_scale_slider, "Off: no AI upscaling.\n2x/4x: AI upscale factor.\nOutput resolution = input × scale.")
-
-    # --- Backend (visible when scale > 1) ---
-    row += 1
-    backend_label = ttk.Label(frame, text="Backend")
-    backend_label.grid(row=row, column=0, sticky="w", pady=4)
-    backend_combo = ttk.Combobox(
-        frame, textvariable=backend_var,
-        values=tuple(backends.keys()), state="disabled", width=16,
-    )
-    backend_combo.grid(row=row, column=1, sticky="w", padx=8)
-    backend_combo.bind("<<ComboboxSelected>>", on_backend_change)
-    backend_label.grid_remove()
-    backend_combo.grid_remove()
-    Tooltip(backend_combo, "Auto: use ONNX if installed, else ncnn.\nONNX (pipe): in-process inference, zero disk I/O.\nncnn (legacy): realesrgan-ncnn-vulkan binary.")
+    Tooltip(ai_scale_slider, "Off: no AI upscaling.\n2x: double width and height.\n4x: quadruple width and height.")
 
     # --- AI model (visible when scale > 1) ---
     row += 1
@@ -488,12 +480,14 @@ def launch_gui() -> None:
     model_label.grid(row=row, column=0, sticky="w", pady=4)
     model_combo = ttk.Combobox(
         frame, textvariable=model_var,
-        values=tuple(ncnn_models.keys()), state="disabled", width=16,
+        values=tuple(ncnn_models.keys()), state="disabled", width=20,
     )
     model_combo.grid(row=row, column=1, sticky="w", padx=8)
     model_label.grid_remove()
     model_combo.grid_remove()
-    Tooltip(model_combo, "General: best for live action and photos.\nAnimation: optimized for animated video.\nAnime: tuned for anime art style.\nFast: lighter model, quicker but lower quality.")
+    _onnx_tip = "SPAN: fast and lightweight, under 2 GB VRAM.\nCompact: good for animation, very fast.\nESRGAN: highest quality, slower, uses ~5 GB VRAM."
+    _ncnn_tip = "General: best for live action and photos.\nAnimation: optimized for animated video.\nAnime: tuned for anime art style.\nFast: lighter model, quicker but lower quality."
+    model_tip = Tooltip(model_combo, _onnx_tip if _is_onnx_backend() else _ncnn_tip)
 
     # --- Options ---
     row += 1
