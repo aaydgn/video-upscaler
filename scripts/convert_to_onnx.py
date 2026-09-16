@@ -5,7 +5,7 @@ Requires extra dependencies (not part of the main app):
 
 Usage:
     python scripts/convert_to_onnx.py path/to/model.pth
-    python scripts/convert_to_onnx.py path/to/model.safetensors -o models/my_model.onnx
+    python scripts/convert_to_onnx.py path/to/model.safetensors -o ~/.video-upscaler/models/my_model.onnx
 """
 from __future__ import annotations
 
@@ -38,20 +38,22 @@ def convert(input_path: str, output_path: str | None = None, opset: int = 17) ->
     dummy = torch.randn(1, 3, 64, 64)
     print(f"Exporting to ONNX (scale={scale}, arch={arch_name}, opset={opset})...")
 
-    torch.onnx.export(
-        model,
-        dummy,
-        output_path,
-        opset_version=opset,
-        input_names=["input"],
-        output_names=["output"],
-        dynamic_axes={
-            "input": {0: "batch", 2: "height", 3: "width"},
-            "output": {0: "batch", 2: "height", 3: "width"},
-        },
-    )
+    with torch.no_grad():
+        torch.onnx.export(
+            model,
+            dummy,
+            output_path,
+            opset_version=opset,
+            input_names=["input"],
+            output_names=["output"],
+            dynamic_axes={
+                "input": {0: "batch", 2: "height", 3: "width"},
+                "output": {0: "batch", 2: "height", 3: "width"},
+            },
+            dynamo=False,
+        )
     size_mb = Path(output_path).stat().st_size / 1024 / 1024
-    print(f"Done: {output_path} ({size_mb:.1f} MB)")
+    print(f"Done: {output_path} ({size_mb:.1f} MB, scale={scale}x)")
 
 
 if __name__ == "__main__":

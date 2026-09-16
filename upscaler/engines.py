@@ -15,7 +15,7 @@ from upscaler.ffmpeg import (
     select_video_encoder,
     should_interpolate_to_60,
 )
-from upscaler.models import DEFAULT_ONNX_MODEL, ensure_model
+from upscaler.models import DEFAULT_ONNX_MODEL, default_for_scale, ensure_model
 from upscaler.pipeline import run_onnx_pipeline
 from upscaler.process import (
     count_image_files,
@@ -411,6 +411,8 @@ def upscale(
         if not fps:
             fps = 30.0
             log("Warning: could not detect frame rate; using 30 fps.")
+        if onnx_model == DEFAULT_ONNX_MODEL:
+            onnx_model = default_for_scale(scale)
         model_path = ensure_model(onnx_model, log)
         log(f"Backend: ONNX ({model_path.name})")
         return_code = run_onnx_pipeline(

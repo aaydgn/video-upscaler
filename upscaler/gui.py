@@ -9,7 +9,7 @@ from pathlib import Path
 
 from upscaler.config import AI_2X_MODEL
 from upscaler.engines import upscale
-from upscaler.models import DEFAULT_ONNX_MODEL
+from upscaler.models import DEFAULT_ONNX_MODEL, FRIENDLY_NAMES, list_installed
 from upscaler.process import active_subprocess
 from upscaler.tools import inspect_tools
 
@@ -40,13 +40,21 @@ def launch_gui() -> None:
     messages: queue.Queue = queue.Queue()
 
     scale_labels = {1: "Off", 2: "2x", 3: "3x", 4: "4x"}
-    models = {
+    ncnn_models = {
         "General": "realesrgan-x4plus",
         "Animation": "realesr-animevideov3",
         "Anime": "realesrgan-x4plus-anime",
         "Fast": "realesrnet-x4plus",
     }
     backends = {"Auto": "auto", "ONNX (pipe)": "onnx", "ncnn (legacy)": "ncnn"}
+    onnx_model_var = tk.StringVar()
+    _onnx_models: dict[str, str] = {}
+
+    def _refresh_onnx_models() -> None:
+        _onnx_models.clear()
+        for name, info in list_installed():
+            friendly = FRIENDLY_NAMES.get(name, name)
+            _onnx_models[friendly] = name
 
     _job_start_time: list[float | None] = [None]
     _elapsed_after_id: list[str | None] = [None]
@@ -64,7 +72,7 @@ def launch_gui() -> None:
                 quality_var.set(max(14, min(28, prefs["quality"])))
             if isinstance(prefs.get("ai_scale"), int) and prefs["ai_scale"] in scale_labels:
                 ai_scale_var.set(prefs["ai_scale"])
-            if prefs.get("model") in models:
+            if prefs.get("model") in ncnn_models:
                 model_var.set(prefs["model"])
             if prefs.get("backend") in backends:
                 backend_var.set(prefs["backend"])
@@ -144,11 +152,30 @@ def launch_gui() -> None:
         if input_var.get():
             output_var.set(str(default_output_for(Path(input_var.get()))))
 
-    def on_scale_change(_value: str) -> None:
-        val = round(float(_value))
-        ai_scale_var.set(val)
-        ai_scale_label_var.set(scale_labels[val])
-        if val >= 4:
+    def _is_onnx_backend() -> bool:
+        key = backend_var.get()
+        return backends.get(key, "auto") in ("onnx", "auto")
+
+    def _sync_model_combo() -> None:
+        val = ai_scale_var.get()
+        if val <= 1:
+            model_label.grid_remove()
+            model_combo.grid_remove()
+            model_combo.configure(state="disabled")
+            return
+        if _is_onnx_backend() and val >= 4:
+            _refresh_onnx_models()
+            model_combo.configure(values=tuple(_onnx_models.keys()))
+            if model_var.get() not in _onnx_models:
+                first = next(iter(_onnx_models), "")
+                model_var.set(first)
+            model_label.grid()
+            model_combo.grid()
+            model_combo.configure(state="readonly")
+        elif not _is_onnx_backend() and val >= 4:
+            model_combo.configure(values=tuple(ncnn_models.keys()))
+            if model_var.get() not in ncnn_models:
+                model_var.set("Animation")
             model_label.grid()
             model_combo.grid()
             model_combo.configure(state="readonly")
@@ -156,6 +183,11 @@ def launch_gui() -> None:
             model_label.grid_remove()
             model_combo.grid_remove()
             model_combo.configure(state="disabled")
+
+    def on_scale_change(_value: str) -> None:
+        val = round(float(_value))
+        ai_scale_var.set(val)
+        ai_scale_label_var.set(scale_labels[val])
         if val > 1:
             backend_label.grid()
             backend_combo.grid()
@@ -164,7 +196,11 @@ def launch_gui() -> None:
             backend_label.grid_remove()
             backend_combo.grid_remove()
             backend_combo.configure(state="disabled")
+        _sync_model_combo()
         update_default_output()
+
+    def on_backend_change(_event: object = None) -> None:
+        _sync_model_combo()
 
     def on_quality_change(_value: str) -> None:
         quality_var.set(round(float(_value)))
@@ -321,9 +357,10 @@ def launch_gui() -> None:
         scale = ai_scale_var.get()
         engine = "ai" if scale > 1 else "ffmpeg"
         model_key = model_var.get()
-        model = models.get(model_key, AI_2X_MODEL)
+        model = ncnn_models.get(model_key, AI_2X_MODEL)
         backend_key = backend_var.get()
         backend = backends.get(backend_key, "auto")
+        onnx_model_name = _onnx_models.get(model_key, DEFAULT_ONNX_MODEL)
 
         _cancel_event.clear()
         set_controls_enabled(False)
@@ -355,6 +392,7 @@ def launch_gui() -> None:
                     interp60_var.get(),
                     None,
                     backend=backend,
+                    onnx_model=onnx_model_name,
                     log=messages.put,
                     progress=queue_progress,
                 )
@@ -431,7 +469,7 @@ def launch_gui() -> None:
     model_label.grid(row=row, column=0, sticky="w", pady=4)
     model_combo = ttk.Combobox(
         frame, textvariable=model_var,
-        values=tuple(models.keys()), state="disabled", width=16,
+        values=tuple(ncnn_models.keys()), state="disabled", width=16,
     )
     model_combo.grid(row=row, column=1, sticky="w", padx=8)
     model_label.grid_remove()
@@ -447,6 +485,7 @@ def launch_gui() -> None:
         values=tuple(backends.keys()), state="disabled", width=16,
     )
     backend_combo.grid(row=row, column=1, sticky="w", padx=8)
+    backend_combo.bind("<<ComboboxSelected>>", on_backend_change)
     backend_label.grid_remove()
     backend_combo.grid_remove()
     Tooltip(backend_combo, "Auto: use ONNX if installed, else ncnn.\nONNX (pipe): in-process inference, zero disk I/O.\nncnn (legacy): realesrgan-ncnn-vulkan binary.")

@@ -21,14 +21,23 @@ class ModelInfo:
 
 
 KNOWN_MODELS: dict[str, ModelInfo] = {
-    "realesrgan-x4plus": ModelInfo(
-        name="realesrgan-x4plus",
-        filename="RealESRGAN_x4plus.onnx",
+    "2xHFA2kSPAN": ModelInfo(
+        name="2xHFA2kSPAN",
+        filename="2xHFA2kSPAN.onnx",
+        scale=2,
+        architecture="SPAN",
+        size_mb=1.6,
+        url="https://github.com/Phhofm/models/releases/download/2xHFA2kSPAN/2xHFA2kSPAN_fp32_opset17.onnx",
+        description="Fast 2x anime upscaler (SPAN)",
+    ),
+    "4xNomosUni_span_multijpg": ModelInfo(
+        name="4xNomosUni_span_multijpg",
+        filename="4xNomosUni_span_multijpg.onnx",
         scale=4,
-        architecture="RRDBNet",
-        size_mb=67.0,
-        url="https://huggingface.co/qualcomm/Real-ESRGAN-x4plus/resolve/01179a4da7bf5ac91faca650e6afbf282ac93933/Real-ESRGAN-x4plus.onnx",
-        description="General 4x upscaler — photos and mixed content",
+        architecture="SPAN",
+        size_mb=1.6,
+        url=None,
+        description="Fast 4x universal upscaler (SPAN)",
     ),
     "realesr-animevideov3": ModelInfo(
         name="realesr-animevideov3",
@@ -39,24 +48,33 @@ KNOWN_MODELS: dict[str, ModelInfo] = {
         url=None,
         description="Fast 4x upscaler for animated video",
     ),
-    "realesrgan-x4plus-anime": ModelInfo(
-        name="realesrgan-x4plus-anime",
-        filename="RealESRGAN_x4plus_anime_6B.onnx",
+    "realesrgan-x4plus": ModelInfo(
+        name="realesrgan-x4plus",
+        filename="RealESRGAN_x4plus.onnx",
         scale=4,
         architecture="RRDBNet",
-        size_mb=18.0,
+        size_mb=64.0,
         url=None,
-        description="Anime-optimised 4x upscaler",
+        description="General 4x upscaler — photos and mixed content",
     ),
 }
 
 FRIENDLY_NAMES: dict[str, str] = {
-    "realesrgan-x4plus": "General (RealESRGAN x4plus)",
-    "realesr-animevideov3": "Animation (animevideov3)",
-    "realesrgan-x4plus-anime": "Anime (RealESRGAN x4plus anime)",
+    "2xHFA2kSPAN": "SPAN 2x Anime",
+    "4xNomosUni_span_multijpg": "SPAN 4x Universal",
+    "realesr-animevideov3": "Compact 4x Animation",
+    "realesrgan-x4plus": "ESRGAN 4x General",
 }
 
-DEFAULT_ONNX_MODEL = "realesrgan-x4plus"
+DEFAULT_ONNX_2X = "2xHFA2kSPAN"
+DEFAULT_ONNX_4X = "4xNomosUni_span_multijpg"
+DEFAULT_ONNX_MODEL = DEFAULT_ONNX_4X
+
+
+def default_for_scale(scale: int) -> str:
+    if scale <= 2:
+        return DEFAULT_ONNX_2X
+    return DEFAULT_ONNX_4X
 
 
 def find_model(name_or_path: str) -> Path | None:
@@ -101,7 +119,7 @@ def download_model(
         log(f"Model already downloaded: {dest}")
         return dest
 
-    log(f"Downloading {info.filename} ({info.size_mb:.0f} MB)...")
+    log(f"Downloading {info.filename} ({info.size_mb:.1f} MB)...")
     tmp = dest.with_suffix(".onnx.tmp")
     try:
         def _progress(block: int, block_size: int, total: int) -> None:
@@ -136,11 +154,11 @@ def ensure_model(
     )
 
 
-def list_available() -> list[tuple[str, ModelInfo, bool]]:
+def list_installed() -> list[tuple[str, ModelInfo]]:
     result = []
     for name, info in KNOWN_MODELS.items():
-        installed = (user_models_dir() / info.filename).exists()
-        result.append((name, info, installed))
+        if (user_models_dir() / info.filename).exists():
+            result.append((name, info))
     for p in user_models_dir().glob("*.onnx"):
         if not any(info.filename == p.name for info in KNOWN_MODELS.values()):
             custom = ModelInfo(
@@ -152,5 +170,5 @@ def list_available() -> list[tuple[str, ModelInfo, bool]]:
                 url=None,
                 description="Custom ONNX model",
             )
-            result.append((p.stem, custom, True))
+            result.append((p.stem, custom))
     return result
