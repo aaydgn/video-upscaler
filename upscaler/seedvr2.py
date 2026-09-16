@@ -54,6 +54,7 @@ def run_seedvr2(
         "--output", str(output_path),
         "--resolution", str(resolution),
         "--batch_size", "5",
+        "--dit_offload_device", "cpu",
         "--blocks_to_swap", "28",
         "--vae_encode_tiled",
         "--vae_decode_tiled",

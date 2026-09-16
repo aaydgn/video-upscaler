@@ -42,7 +42,7 @@ def setup() -> None:
 
     print("Installing PyTorch with CUDA...")
     subprocess.run(
-        [pip, "install", "torch", "torchvision", "--index-url", "https://download.pytorch.org/whl/cu124"],
+        [pip, "install", "torch", "torchvision", "--index-url", "https://download.pytorch.org/whl/cu130"],
         check=True,
     )
 
