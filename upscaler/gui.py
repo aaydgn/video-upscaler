@@ -26,7 +26,10 @@ def launch_gui() -> None:
     input_var = tk.StringVar()
     output_var = tk.StringVar()
     ai_scale_var = tk.IntVar(value=1)
+    _slider_var = tk.IntVar(value=0)
     ai_scale_label_var = tk.StringVar(value="Off")
+    _slider_to_scale = {0: 1, 1: 2, 2: 4}
+    _scale_to_slider = {1: 0, 2: 1, 4: 2}
     model_var = tk.StringVar(value="Animation")
     backend_var = tk.StringVar(value="Auto")
     codec_var = tk.StringVar(value="h264")
@@ -78,6 +81,7 @@ def launch_gui() -> None:
                 quality_var.set(max(14, min(28, prefs["quality"])))
             if isinstance(prefs.get("ai_scale"), int) and prefs["ai_scale"] in scale_labels:
                 ai_scale_var.set(prefs["ai_scale"])
+                _slider_var.set(_scale_to_slider.get(prefs["ai_scale"], 0))
             if prefs.get("model") in ncnn_models:
                 model_var.set(prefs["model"])
             if prefs.get("backend") in backends:
@@ -184,9 +188,9 @@ def launch_gui() -> None:
         model_combo.configure(state="readonly")
 
     def on_scale_change(_value: str) -> None:
-        val = round(float(_value))
-        if val == 3:
-            val = 4
+        pos = round(float(_value))
+        _slider_var.set(pos)
+        val = _slider_to_scale.get(pos, 1)
         ai_scale_var.set(val)
         ai_scale_label_var.set(scale_labels.get(val, f"{val}x"))
         if val > 1:
@@ -254,7 +258,7 @@ def launch_gui() -> None:
         input_browse_btn.configure(state=state)
         output_browse_btn.configure(state=state)
         ai_scale_slider.configure(state=state)
-        model_combo.configure(state="readonly" if enabled and ai_scale_var.get() >= 4 else "disabled")
+        model_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
         backend_combo.configure(state="readonly" if enabled and ai_scale_var.get() > 1 else "disabled")
         for rb in codec_radios:
             rb.configure(state=state)
@@ -459,10 +463,10 @@ def launch_gui() -> None:
     scale_frame = ttk.Frame(frame)
     scale_frame.grid(row=row, column=1, sticky="ew", padx=8)
     scale_frame.columnconfigure(0, weight=1)
-    ai_scale_slider = ttk.Scale(scale_frame, from_=1, to=4, variable=ai_scale_var, orient="horizontal", command=on_scale_change)
+    ai_scale_slider = ttk.Scale(scale_frame, from_=0, to=2, variable=_slider_var, orient="horizontal", command=on_scale_change)
     ai_scale_slider.grid(row=0, column=0, sticky="ew")
     ttk.Label(scale_frame, textvariable=ai_scale_label_var, width=4, anchor="e").grid(row=0, column=1, padx=(8, 0))
-    Tooltip(ai_scale_slider, "Off: no AI upscaling.\n2x/3x/4x: Real-ESRGAN upscale factor.\nOutput resolution = input × scale.")
+    Tooltip(ai_scale_slider, "Off: no AI upscaling.\n2x/4x: AI upscale factor.\nOutput resolution = input × scale.")
 
     # --- Backend (visible when scale > 1) ---
     row += 1
@@ -561,6 +565,6 @@ def launch_gui() -> None:
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     load_settings()
-    on_scale_change(str(ai_scale_var.get()))
+    on_scale_change(str(_slider_var.get()))
     drain_messages()
     root.mainloop()
