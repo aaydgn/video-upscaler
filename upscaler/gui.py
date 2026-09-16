@@ -50,11 +50,17 @@ def launch_gui() -> None:
     onnx_model_var = tk.StringVar()
     _onnx_models: dict[str, str] = {}
 
-    def _refresh_onnx_models() -> None:
+    def _refresh_onnx_models(scale: int) -> None:
         _onnx_models.clear()
         for name, info in list_installed():
-            friendly = FRIENDLY_NAMES.get(name, name)
-            _onnx_models[friendly] = name
+            if info.scale == scale:
+                friendly = FRIENDLY_NAMES.get(name, name)
+                _onnx_models[friendly] = name
+        if not _onnx_models:
+            for name, info in list_installed():
+                if info.scale >= scale:
+                    friendly = FRIENDLY_NAMES.get(name, name)
+                    _onnx_models[friendly] = name
 
     _job_start_time: list[float | None] = [None]
     _elapsed_after_id: list[str | None] = [None]
@@ -164,7 +170,7 @@ def launch_gui() -> None:
             model_combo.configure(state="disabled")
             return
         if _is_onnx_backend():
-            _refresh_onnx_models()
+            _refresh_onnx_models(val)
             model_combo.configure(values=tuple(_onnx_models.keys()))
             if model_var.get() not in _onnx_models:
                 first = next(iter(_onnx_models), "")
