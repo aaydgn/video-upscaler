@@ -49,7 +49,7 @@ def launch_gui() -> None:
         "Anime": "realesrgan-x4plus-anime",
         "Fast": "realesrnet-x4plus",
     }
-    backends = {"Auto": "auto", "ONNX (pipe)": "onnx", "ncnn (legacy)": "ncnn"}
+    backends = {"Auto": "auto", "ONNX (pipe)": "onnx", "ncnn (Vulkan)": "ncnn", "SeedVR2 (diffusion)": "seedvr2"}
     onnx_model_var = tk.StringVar()
     _onnx_models: dict[str, str] = {}
 
@@ -162,13 +162,17 @@ def launch_gui() -> None:
         if input_var.get():
             output_var.set(str(default_output_for(Path(input_var.get()))))
 
-    def _is_onnx_backend() -> bool:
+    def _selected_backend() -> str:
         key = backend_var.get()
-        return backends.get(key, "auto") in ("onnx", "auto")
+        return backends.get(key, "auto")
+
+    def _is_onnx_backend() -> bool:
+        return _selected_backend() in ("onnx", "auto")
 
     def _sync_model_combo() -> None:
         val = ai_scale_var.get()
-        if val <= 1:
+        be = _selected_backend()
+        if val <= 1 or be == "seedvr2":
             model_label.grid_remove()
             model_combo.grid_remove()
             model_combo.configure(state="disabled")
@@ -421,6 +425,8 @@ def launch_gui() -> None:
                 parts.append(f"ONNX ✓ ({select_provider().replace('ExecutionProvider', '')})")
             except ImportError:
                 parts.append("ONNX ✗")
+            from upscaler.seedvr2 import find_seedvr2
+            parts.append("SeedVR2 ✓" if find_seedvr2() else "SeedVR2 ✗")
             messages.put(("tool_status", "  ·  ".join(parts)))
         except Exception as exc:
             messages.put(("tool_status", f"Tool check failed: {exc}"))
@@ -461,7 +467,7 @@ def launch_gui() -> None:
     )
     backend_combo.grid(row=row, column=1, sticky="w", padx=8)
     backend_combo.bind("<<ComboboxSelected>>", on_backend_change)
-    Tooltip(backend_combo, "Auto: use ONNX if installed, else ncnn.\nONNX (pipe): in-process GPU inference, zero disk I/O.\nncnn (legacy): realesrgan-ncnn-vulkan binary.")
+    Tooltip(backend_combo, "Auto: ncnn if installed, else ONNX.\nncnn (Vulkan): fastest, uses realesrgan-ncnn-vulkan.\nONNX (pipe): in-process GPU inference, zero disk I/O.\nSeedVR2 (diffusion): best quality, slow. Temporal-aware.")
 
     # --- AI upscale slider ---
     row += 1

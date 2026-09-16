@@ -25,7 +25,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--enhance", action=argparse.BooleanOptionalAction, default=True, help="Apply deblock/denoise/sharpen filters (default: on).")
     parser.add_argument("--interp60", action="store_true", help="Interpolate the final output to exact 60 fps.")
     parser.add_argument("--target", help="Target output resolution, e.g. 1920x1080. Downscales after processing.")
-    parser.add_argument("--backend", choices=["auto", "onnx", "ncnn"], default="auto", help="AI upscale backend: onnx (in-process, no disk I/O), ncnn (realesrgan-ncnn-vulkan), auto (onnx if available, else ncnn).")
+    parser.add_argument("--backend", choices=["auto", "onnx", "ncnn", "seedvr2"], default="auto", help="AI upscale backend: onnx (in-process), ncnn (realesrgan-ncnn-vulkan), seedvr2 (diffusion, best quality, slow), auto (ncnn if available, else onnx).")
     parser.add_argument("--onnx-model", default=DEFAULT_ONNX_MODEL, help="ONNX model name or path to .onnx file.")
     parser.add_argument("--tile-size", type=int, default=0, help="ONNX tile size (0 = whole frame, e.g. 512 for low VRAM).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output file if it exists.")
@@ -58,6 +58,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"onnx_providers: {', '.join(ort.get_available_providers())}")
         except ImportError:
             print("onnxruntime: not installed")
+        from upscaler.seedvr2 import find_seedvr2
+        sv2 = find_seedvr2()
+        print(f"seedvr2: {sv2[1] if sv2 else 'not installed (run: python scripts/setup_seedvr2.py)'}")
         return 0
     if not args.input:
         from upscaler.gui import launch_gui
