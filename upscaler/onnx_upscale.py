@@ -56,9 +56,56 @@ def detect_scale(session: object, test_h: int = 64, test_w: int = 64) -> int:
     return result.shape[2] // test_h
 
 
-def _use_fp16(session: object) -> bool:
-    in_type = session.get_inputs()[0].type
-    return "float16" in in_type
+class FrameUpscaler:
+    """Batched inference with pre-allocated buffers."""
+
+    def __init__(
+        self, session: object, width: int, height: int, scale: int, batch_size: int = 1,
+    ) -> None:
+        self.session = session
+        self.scale = scale
+        self.width = width
+        self.height = height
+        self.batch_size = batch_size
+        self.in_name = session.get_inputs()[0].name
+        self.out_name = session.get_outputs()[0].name
+
+        self._input_buf = np.empty((batch_size, 3, height, width), dtype=np.float32)
+        self._norm_buf = np.empty((height, width, 3), dtype=np.float32)
+        self._scale_factor = np.float32(1.0 / 255.0)
+
+    def _prepare(self, frame: np.ndarray, idx: int) -> None:
+        self._norm_buf[:] = frame
+        self._norm_buf *= self._scale_factor
+        self._input_buf[idx, 0] = self._norm_buf[:, :, 0]
+        self._input_buf[idx, 1] = self._norm_buf[:, :, 1]
+        self._input_buf[idx, 2] = self._norm_buf[:, :, 2]
+
+    def upscale(self, frame: np.ndarray) -> np.ndarray:
+        self._prepare(frame, 0)
+        result = self.session.run(
+            [self.out_name], {self.in_name: self._input_buf[:1]}
+        )[0]
+        return np.clip(
+            result.squeeze(0).transpose(1, 2, 0) * 255.0, 0, 255
+        ).astype(np.uint8)
+
+    def upscale_batch(self, frames: list[np.ndarray]) -> list[np.ndarray]:
+        n = len(frames)
+        for i, f in enumerate(frames):
+            self._prepare(f, i)
+
+        result = self.session.run(
+            [self.out_name], {self.in_name: self._input_buf[:n]}
+        )[0]
+
+        out = []
+        for i in range(n):
+            arr = np.clip(
+                result[i].transpose(1, 2, 0) * 255.0, 0, 255
+            ).astype(np.uint8)
+            out.append(arr)
+        return out
 
 
 def _infer(session: object, frame: np.ndarray) -> np.ndarray:
@@ -68,9 +115,6 @@ def _infer(session: object, frame: np.ndarray) -> np.ndarray:
     tensor = (frame.astype(np.float32) / 255.0)
     tensor = np.transpose(tensor, (2, 0, 1))
     tensor = np.expand_dims(tensor, axis=0)
-
-    if _use_fp16(session):
-        tensor = tensor.astype(np.float16)
 
     result = session.run([out_name], {in_meta.name: tensor})[0]
     return np.clip(

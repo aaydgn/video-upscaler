@@ -9,7 +9,7 @@ import numpy as np
 
 from upscaler.config import ONNX_TILE_SIZE, ProgressCallback
 from upscaler.ffmpeg import probe_video, select_video_encoder
-from upscaler.onnx_upscale import create_session, detect_scale, upscale_frame
+from upscaler.onnx_upscale import FrameUpscaler, create_session, detect_scale
 from upscaler.process import active_subprocess, report_progress
 from upscaler.tools import ToolInfo
 
@@ -58,6 +58,8 @@ def run_onnx_pipeline(
         log(f"Pipeline: {width}x{height} -> {out_w}x{out_h} ({model_scale}x)")
     scale = model_scale
 
+    batch_size = 4
+    upscaler = FrameUpscaler(session, width, height, scale, batch_size=batch_size)
     total_frames = int(duration * fps) if duration and fps else None
 
     decode_cmd = _build_decode_cmd(tools, input_path, enhance)
@@ -97,19 +99,29 @@ def run_onnx_pipeline(
     frame_count = 0
     try:
         assert decoder.stdout is not None
+        assert encoder.stdin is not None
         while True:
-            raw = decoder.stdout.read(frame_bytes_in)
-            if len(raw) < frame_bytes_in:
+            batch: list[np.ndarray] = []
+            for _ in range(batch_size):
+                raw = decoder.stdout.read(frame_bytes_in)
+                if len(raw) < frame_bytes_in:
+                    break
+                batch.append(
+                    np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
+                )
+            if not batch:
                 break
 
-            frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
-            upscaled = upscale_frame(session, frame, scale, tile_size=tile_size)
+            if len(batch) == 1:
+                results = [upscaler.upscale(batch[0])]
+            else:
+                results = upscaler.upscale_batch(batch)
 
-            assert encoder.stdin is not None
-            encoder.stdin.write(upscaled.tobytes())
+            for upscaled in results:
+                encoder.stdin.write(upscaled.tobytes())
 
-            frame_count += 1
-            if frame_count % 10 == 0 or frame_count == total_frames:
+            frame_count += len(batch)
+            if frame_count % 10 < batch_size or frame_count == total_frames:
                 report_progress(
                     "ONNX upscaling", frame_count, total_frames, log, progress,
                 )
