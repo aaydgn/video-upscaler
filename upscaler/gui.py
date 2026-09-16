@@ -175,20 +175,13 @@ def launch_gui() -> None:
             if model_var.get() not in _onnx_models:
                 first = next(iter(_onnx_models), "")
                 model_var.set(first)
-            model_label.grid()
-            model_combo.grid()
-            model_combo.configure(state="readonly")
-        elif val >= 4:
+        else:
             model_combo.configure(values=tuple(ncnn_models.keys()))
             if model_var.get() not in ncnn_models:
                 model_var.set("Animation")
-            model_label.grid()
-            model_combo.grid()
-            model_combo.configure(state="readonly")
-        else:
-            model_label.grid_remove()
-            model_combo.grid_remove()
-            model_combo.configure(state="disabled")
+        model_label.grid()
+        model_combo.grid()
+        model_combo.configure(state="readonly")
 
     def on_scale_change(_value: str) -> None:
         val = round(float(_value))
@@ -471,20 +464,7 @@ def launch_gui() -> None:
     ttk.Label(scale_frame, textvariable=ai_scale_label_var, width=4, anchor="e").grid(row=0, column=1, padx=(8, 0))
     Tooltip(ai_scale_slider, "Off: no AI upscaling.\n2x/3x/4x: Real-ESRGAN upscale factor.\nOutput resolution = input × scale.")
 
-    # --- AI model (visible only when scale > 1) ---
-    row += 1
-    model_label = ttk.Label(frame, text="AI model")
-    model_label.grid(row=row, column=0, sticky="w", pady=4)
-    model_combo = ttk.Combobox(
-        frame, textvariable=model_var,
-        values=tuple(ncnn_models.keys()), state="disabled", width=16,
-    )
-    model_combo.grid(row=row, column=1, sticky="w", padx=8)
-    model_label.grid_remove()
-    model_combo.grid_remove()
-    Tooltip(model_combo, "General: best for live action and photos.\nAnimation: optimized for animated video.\nAnime: tuned for anime art style.\nFast: lighter model, quicker but lower quality.")
-
-    # --- Backend ---
+    # --- Backend (visible when scale > 1) ---
     row += 1
     backend_label = ttk.Label(frame, text="Backend")
     backend_label.grid(row=row, column=0, sticky="w", pady=4)
@@ -497,6 +477,19 @@ def launch_gui() -> None:
     backend_label.grid_remove()
     backend_combo.grid_remove()
     Tooltip(backend_combo, "Auto: use ONNX if installed, else ncnn.\nONNX (pipe): in-process inference, zero disk I/O.\nncnn (legacy): realesrgan-ncnn-vulkan binary.")
+
+    # --- AI model (visible when scale > 1) ---
+    row += 1
+    model_label = ttk.Label(frame, text="AI model")
+    model_label.grid(row=row, column=0, sticky="w", pady=4)
+    model_combo = ttk.Combobox(
+        frame, textvariable=model_var,
+        values=tuple(ncnn_models.keys()), state="disabled", width=16,
+    )
+    model_combo.grid(row=row, column=1, sticky="w", padx=8)
+    model_label.grid_remove()
+    model_combo.grid_remove()
+    Tooltip(model_combo, "General: best for live action and photos.\nAnimation: optimized for animated video.\nAnime: tuned for anime art style.\nFast: lighter model, quicker but lower quality.")
 
     # --- Options ---
     row += 1
