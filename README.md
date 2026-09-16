@@ -1,185 +1,120 @@
-# NVIDIA Video Upscaler
+# Video Upscaler
 
-Small Python/Tkinter wrapper for video enhancement and AI upscaling with
-FFmpeg/NVENC and optional Real-ESRGAN and RIFE. The default workflow applies
-deblocking, denoising, and CAS sharpening, then encodes with NVENC.
+AI video upscaler with a Tkinter GUI. Supports two backends for
+GPU-accelerated upscaling, FFmpeg enhancement filters, and RIFE
+frame interpolation to 60 fps.
+
+## Backends
+
+| Backend | Speed | How |
+|---|---|---|
+| **ncnn** (default) | 28-41 fps | Shells out to `realesrgan-ncnn-vulkan`, Vulkan compute |
+| **ONNX** (fallback) | 10-20 fps | In-process via ONNX Runtime + DirectML, zero disk I/O |
+
+Auto mode uses ncnn when installed, falls back to ONNX.
+
+## ONNX Models
+
+Installed to `~/.video-upscaler/models/`. Convert any `.pth` or
+`.safetensors` model to ONNX with `python scripts/convert_to_onnx.py`.
+
+| Model | Scale | Size | Architecture |
+|---|---|---|---|
+| 2xHFA2kSPAN | 2x | 1.6 MB | SPAN |
+| 4xNomosUni_span_multijpg | 4x | 1.6 MB | SPAN |
+| realesr-animevideov3 | 4x | 2.4 MB | SRVGGNetCompact |
+| RealESRGAN_x4plus | 4x | 64 MB | RRDBNet |
 
 ## Requirements
 
-- NVIDIA RTX GPU and current NVIDIA driver
-- `uv`
-- FFmpeg with NVENC support on `PATH`
-- Real-ESRGAN ncnn Vulkan, optional but required for AI upscaling
-- RIFE ncnn Vulkan, optional but required for 60 fps interpolation
+- NVIDIA GPU with current driver
+- [uv](https://docs.astral.sh/uv/)
+- FFmpeg with NVENC support on PATH
+- Real-ESRGAN ncnn Vulkan (optional, for ncnn backend)
+- RIFE ncnn Vulkan (optional, for 60 fps interpolation)
 
 ## Install
 
-Install `uv`:
+```powershell
+uv sync
+```
+
+Check tools:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+uv run python -m upscaler --check
 ```
 
-If this is your current PowerShell session immediately after installing `uv`,
-run:
-
-```powershell
-$env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
-```
-
-Install FFmpeg with NVIDIA encoder support and add its `bin` directory to PATH
-if you are setting this up on another machine. Recommended Windows builds are
-from:
-
-```text
-https://www.gyan.dev/ffmpeg/builds/
-```
-
-After installation, restart PowerShell and check:
-
-```powershell
-uv run python upscaler.py --check
-```
-
-You should see `h264_nvenc: yes`. `scale_cuda` or `scale_npp` is ideal, but the
-script can still use NVENC encoding if only CPU scaling is available.
-For AI upscaling, `realesrgan` should show a path instead of `not found`.
-For interpolation, `rife` should show a path instead of `not found`.
-For enhancement filters, `cas`, `deblock`, and `hqdn3d` should ideally
-show `yes`.
-
-Install RIFE for GPU frame interpolation from:
-
-```text
-https://github.com/nihui/rife-ncnn-vulkan/releases
-```
-
-Extract the Windows zip to:
-
-```text
-C:\Tools\rife-ncnn-vulkan
-```
-
-Then run `.\setup-path.ps1` or add that folder to PATH.
-
-## UI
+## GUI
 
 ```powershell
 .\run-ui.ps1
 ```
 
-From Command Prompt, or by double-clicking:
+Or from Command Prompt:
 
 ```bat
 run-ui.bat
 ```
 
-Choose the source video, choose a workflow, choose the output path, and click
-`Process video`.
+Controls:
+- **Backend** — Auto / ONNX / ncnn
+- **AI upscale** — Off / 2x / 4x
+- **AI model** — per-backend model selection
+- **Enhance** — deblock, denoise pre-filters
+- **60 fps** — RIFE GPU interpolation
+- **Codec** — H.264 or HEVC (NVENC)
+- **Quality** — CQ value (lower = better quality, larger file)
 
-At startup the UI checks which tools are available (FFmpeg, NVENC, Real-ESRGAN,
-RIFE) and shows a one-line status below the Workflow selector.
-
-While a job runs all input controls lock and a **Cancel** button replaces the
-Process button — clicking it terminates the active FFmpeg or Real-ESRGAN
-process. An elapsed-time counter appears next to the progress label. On
-successful completion an **Open folder** button reveals the output directory in
-Explorer.
-
-Codec, quality, workflow, enhance, and interpolation preferences are saved
-automatically when the window closes and restored on next launch.
+Settings persist across sessions.
 
 ## CLI
 
 ```powershell
-uv run python upscaler.py input.mp4
+# AI upscale 4x with ncnn (fastest)
+uv run python -m upscaler input.mp4 --scale 4
+
+# AI upscale 2x with ONNX backend
+uv run python -m upscaler input.mp4 --scale 2 --backend onnx
+
+# Enhance only (deblock + denoise + sharpen, no upscaling)
+uv run python -m upscaler input.mp4
+
+# Skip enhance filters
+uv run python -m upscaler input.mp4 --scale 4 --no-enhance
+
+# Interpolate to 60 fps
+uv run python -m upscaler input.mp4 --interp60
+
+# Combine: upscale + interpolate
+uv run python -m upscaler input.mp4 --scale 4 --interp60
+
+# HEVC codec, quality 18
+uv run python -m upscaler input.mp4 --scale 4 --codec hevc --quality 18
+
+# Use a specific ONNX model
+uv run python -m upscaler input.mp4 --scale 4 --backend onnx --onnx-model path/to/model.onnx
+
+# Tile-based processing for low VRAM
+uv run python -m upscaler input.mp4 --scale 4 --backend onnx --tile-size 512
 ```
 
-That uses the default FFmpeg engine with enhancement on. It applies weak
-deblocking, light denoising, and CAS sharpening, then encodes with NVENC.
-The output keeps the same resolution as the input.
+## Project Structure
 
-To skip the enhance filters and just re-encode:
-
-```powershell
-uv run python upscaler.py input.mp4 --no-enhance
 ```
-
-To AI upscale any video to 2x its resolution:
-
-```powershell
-uv run python upscaler.py input.mp4 --engine ai
+upscaler/
+  __init__.py        # exports upscale()
+  __main__.py        # entry point
+  cli.py             # argparse CLI
+  gui.py             # Tkinter UI
+  config.py          # constants and type aliases
+  engines.py         # upscale dispatch, ncnn pipeline
+  pipeline.py        # ONNX + FFmpeg pipe pipeline
+  onnx_upscale.py    # ONNX Runtime session and inference
+  models.py          # ONNX model registry and download
+  ffmpeg.py          # FFmpeg command building
+  process.py         # subprocess helpers
+  tools.py           # tool discovery (FFmpeg, ESRGAN, RIFE)
+scripts/
+  convert_to_onnx.py # convert .pth/.safetensors to ONNX
 ```
-
-That extracts frames, runs Real-ESRGAN at 2x, and reassembles the video. With
-`--enhance`, deblocking and denoising are applied as pre-filters before the AI
-pass. The output is 2x the input resolution regardless of source size.
-
-To downscale the AI output to a specific resolution:
-
-```powershell
-uv run python upscaler.py input.mp4 --engine ai --target 1920x1080
-```
-
-To interpolate an existing video to exact `60 fps` without changing its
-resolution:
-
-```powershell
-uv run python upscaler.py input.mp4 --engine interp60
-```
-
-To add final-stage interpolation to any workflow:
-
-```powershell
-uv run python upscaler.py input.mp4 --interp60
-uv run python upscaler.py input.mp4 --engine ai --interp60
-```
-
-Interpolation uses `rife-ncnn-vulkan` on the GPU and targets exact `60 fps`.
-Inputs already at `60 fps` are copied or passed through cleanly. Inputs above
-`60 fps` fail with a clear error instead of trying to interpolate downward.
-
-The batch launcher also forwards CLI arguments:
-
-```bat
-run-ui.bat input.mp4 --engine ai
-```
-
-If Windows still has not picked up the PATH changes, run:
-
-```powershell
-.\setup-path.ps1
-```
-
-To add `uv` and FFmpeg to the system PATH for all users, open PowerShell as
-Administrator and run:
-
-```powershell
-.\setup-system-path.ps1
-```
-
-Useful options:
-
-```powershell
-uv run python upscaler.py input.mp4 --codec hevc --quality 18 --overwrite
-```
-
-For animation/anime content, try:
-
-```powershell
-uv run python upscaler.py input.mp4 --engine ai --model realesr-animevideov3
-```
-
-Lower `--quality` values produce larger, higher-quality files. The default is
-`19`, which is a good starting point for H.264 NVENC.
-
-## Notes
-
-- The FFmpeg engine preserves the input resolution unless `--target` is given.
-- AI mode outputs at 2x the input resolution unless `--target` is given.
-- Standalone interpolation preserves the input resolution and converts only the
-  frame rate.
-- AI mode uses conservative Real-ESRGAN tiling to avoid block/tile corruption.
-- 60 fps interpolation uses RIFE on the GPU. It is still frame-heavy at 4K, but
-  avoids FFmpeg's slow CPU `minterpolate` path.
-- Audio and subtitles are copied when possible.
