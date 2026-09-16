@@ -39,7 +39,7 @@ def launch_gui() -> None:
     tool_status_var = tk.StringVar(value="Checking tools…")
     messages: queue.Queue = queue.Queue()
 
-    scale_labels = {1: "Off", 2: "2x", 3: "3x", 4: "4x"}
+    scale_labels = {1: "Off", 2: "2x", 4: "4x"}
     ncnn_models = {
         "General": "realesrgan-x4plus",
         "Animation": "realesr-animevideov3",
@@ -192,8 +192,10 @@ def launch_gui() -> None:
 
     def on_scale_change(_value: str) -> None:
         val = round(float(_value))
+        if val == 3:
+            val = 4
         ai_scale_var.set(val)
-        ai_scale_label_var.set(scale_labels[val])
+        ai_scale_label_var.set(scale_labels.get(val, f"{val}x"))
         if val > 1:
             backend_label.grid()
             backend_combo.grid()

@@ -13,7 +13,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upscale, enhance, or interpolate video with FFmpeg and NVIDIA encoding.")
     parser.add_argument("input", nargs="?", help="Input video path. Omit to launch the GUI.")
     parser.add_argument("-o", "--output", help="Output video path.")
-    parser.add_argument("--scale", type=int, choices=[1, 2, 3, 4], default=1, help="AI upscale factor. 1 = off, 2/3/4 = Real-ESRGAN upscale.")
+    parser.add_argument("--scale", type=int, choices=[1, 2, 4], default=1, help="AI upscale factor. 1 = off, 2x or 4x upscale.")
     parser.add_argument(
         "--model",
         choices=["realesrgan-x4plus", "realesr-animevideov3", "realesrgan-x4plus-anime", "realesrnet-x4plus"],
