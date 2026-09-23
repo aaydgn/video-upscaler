@@ -9,6 +9,7 @@ from upscaler.config import AI_2X_MODEL, INTERPOLATE_FPS, ONNX_TILE_SIZE, Progre
 from upscaler.ffmpeg import (
     build_ffmpeg_command,
     build_stream_copy_command,
+    encoder_args,
     make_work_video_path,
     probe_video,
     select_two_x_model,
@@ -139,14 +140,7 @@ def run_rife_interpolation(
             "1:a?",
             "-map",
             "1:s?",
-            "-c:v",
-            video_encoder,
-            "-preset",
-            "p4" if video_encoder.endswith("_nvenc") else "medium",
-            "-cq",
-            str(quality),
-            "-b:v",
-            "0",
+            *encoder_args(video_encoder, quality),
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -304,11 +298,8 @@ def _assemble_video(
     ]
     if target_width and target_height:
         cmd.extend(["-vf", f"scale={target_width}:{target_height}:flags=lanczos"])
+    cmd.extend(encoder_args(video_encoder, quality))
     cmd.extend([
-        "-c:v", video_encoder,
-        "-preset", "p4" if video_encoder.endswith("_nvenc") else "medium",
-        "-cq", str(quality),
-        "-b:v", "0",
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-c:s", "copy",
@@ -384,6 +375,11 @@ def upscale(
         log(f"Real-ESRGAN: {tools.realesrgan}")
     if tools.rife:
         log(f"RIFE: {tools.rife}")
+    hw_enc = (
+        "NVENC" if tools.has_h264_nvenc or tools.has_hevc_nvenc
+        else "AMF" if tools.has_h264_amf or tools.has_hevc_amf
+        else "software"
+    )
     log(
         "Acceleration: "
         + (
@@ -391,7 +387,7 @@ def upscale(
             if tools.has_cuda_scale
             else "NPP scale"
             if tools.has_npp_scale
-            else "CPU scale with NVENC encode"
+            else f"CPU scale + {hw_enc} encode"
         )
     )
 

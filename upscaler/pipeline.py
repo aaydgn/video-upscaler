@@ -8,7 +8,7 @@ from typing import Callable
 import numpy as np
 
 from upscaler.config import ONNX_TILE_SIZE, ProgressCallback
-from upscaler.ffmpeg import probe_video, select_video_encoder
+from upscaler.ffmpeg import encoder_args, probe_video, select_video_encoder
 from upscaler.onnx_upscale import FrameUpscaler, create_session, detect_scale
 from upscaler.process import active_subprocess, report_progress
 from upscaler.tools import ToolInfo
@@ -216,11 +216,8 @@ def _build_encode_cmd(
         )
     if post_filters:
         cmd.extend(["-vf", ",".join(post_filters)])
+    cmd.extend(encoder_args(video_encoder, quality))
     cmd.extend([
-        "-c:v", video_encoder,
-        "-preset", "p4" if video_encoder.endswith("_nvenc") else "medium",
-        "-cq", str(quality),
-        "-b:v", "0",
         "-pix_fmt", "yuv420p",
         "-c:a", "copy",
         "-c:s", "copy",

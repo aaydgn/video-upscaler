@@ -10,7 +10,7 @@ from upscaler.tools import inspect_tools
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Upscale, enhance, or interpolate video with FFmpeg and NVIDIA encoding.")
+    parser = argparse.ArgumentParser(description="Upscale, enhance, or interpolate video with FFmpeg and GPU encoding.")
     parser.add_argument("input", nargs="?", help="Input video path. Omit to launch the GUI.")
     parser.add_argument("-o", "--output", help="Output video path.")
     parser.add_argument("--scale", type=int, choices=[1, 2, 4], default=1, help="AI upscale factor. 1 = off, 2x or 4x upscale.")
@@ -20,8 +20,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=AI_2X_MODEL,
         help="Real-ESRGAN model (default auto-selected per scale).",
     )
-    parser.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="NVENC codec.")
-    parser.add_argument("--quality", type=int, default=19, help="NVENC CQ value, lower is larger/better.")
+    parser.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="Video codec (uses NVENC, AMF, or software encoder).")
+    parser.add_argument("--quality", type=int, default=19, help="Constant quality value, lower is larger/better.")
     parser.add_argument("--enhance", action=argparse.BooleanOptionalAction, default=True, help="Apply deblock/denoise/sharpen filters (default: on).")
     parser.add_argument("--interp60", action="store_true", help="Interpolate the final output to exact 60 fps.")
     parser.add_argument("--target", help="Target output resolution, e.g. 1920x1080. Downscales after processing.")
@@ -29,7 +29,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--onnx-model", default=DEFAULT_ONNX_MODEL, help="ONNX model name or path to .onnx file.")
     parser.add_argument("--tile-size", type=int, default=0, help="ONNX tile size (0 = whole frame, e.g. 512 for low VRAM).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the output file if it exists.")
-    parser.add_argument("--check", action="store_true", help="Check FFmpeg/NVIDIA capabilities and exit.")
+    parser.add_argument("--check", action="store_true", help="Check FFmpeg/GPU capabilities and exit.")
     return parser.parse_args(argv)
 
 
@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"hqdn3d: {'yes' if tools.has_hqdn3d else 'no'}")
         print(f"h264_nvenc: {'yes' if tools.has_h264_nvenc else 'no'}")
         print(f"hevc_nvenc: {'yes' if tools.has_hevc_nvenc else 'no'}")
+        print(f"h264_amf: {'yes' if tools.has_h264_amf else 'no'}")
+        print(f"hevc_amf: {'yes' if tools.has_hevc_amf else 'no'}")
         print(f"realesrgan: {tools.realesrgan or 'not found'}")
         print(f"rife: {tools.rife or 'not found'}")
         try:

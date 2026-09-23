@@ -1,8 +1,8 @@
 # Video Upscaler
 
-AI video upscaler with a Tkinter GUI. Supports two backends for
-GPU-accelerated upscaling, FFmpeg enhancement filters, and RIFE
-frame interpolation to 60 fps.
+AI video upscaler with a Tkinter GUI. Works on NVIDIA and AMD GPUs.
+Supports two backends for GPU-accelerated upscaling, FFmpeg
+enhancement filters, and RIFE frame interpolation to 60 fps.
 
 ## Backends
 
@@ -27,9 +27,9 @@ Installed to `~/.video-upscaler/models/`. Convert any `.pth` or
 
 ## Requirements
 
-- NVIDIA GPU with current driver
+- NVIDIA or AMD GPU with current driver
 - [uv](https://docs.astral.sh/uv/)
-- FFmpeg with NVENC support on PATH
+- FFmpeg on PATH (NVENC for NVIDIA, AMF for AMD, falls back to software encoding)
 - Real-ESRGAN ncnn Vulkan (optional, for ncnn backend)
 - RIFE ncnn Vulkan (optional, for 60 fps interpolation)
 
@@ -63,7 +63,7 @@ Controls:
 - **AI model** — per-backend model selection
 - **Enhance** — deblock, denoise pre-filters
 - **60 fps** — RIFE GPU interpolation
-- **Codec** — H.264 or HEVC (NVENC)
+- **Codec** — H.264 or HEVC (NVENC / AMF / software)
 - **Quality** — CQ value (lower = better quality, larger file)
 
 Settings persist across sessions.

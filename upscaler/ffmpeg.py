@@ -97,22 +97,16 @@ def build_ffmpeg_command(
     target_width: int | None = None,
     target_height: int | None = None,
 ) -> list[str]:
-    if codec == "hevc" and tools.has_hevc_nvenc:
-        video_encoder = "hevc_nvenc"
-    elif tools.has_h264_nvenc:
-        video_encoder = "h264_nvenc"
-    elif tools.has_hevc_nvenc:
-        video_encoder = "hevc_nvenc"
-    else:
-        raise RuntimeError("This FFmpeg build does not expose h264_nvenc or hevc_nvenc.")
+    video_encoder = select_video_encoder(tools, codec)
 
     hw_args: list[str] = []
     video_filter: str | None = None
+    use_cuda_hw = video_encoder.endswith("_nvenc")
 
-    if target_width and target_height and tools.has_cuda_scale and not enhance:
+    if target_width and target_height and tools.has_cuda_scale and not enhance and use_cuda_hw:
         video_filter = f"scale_cuda=w={target_width}:h={target_height}:interp_algo=lanczos"
         hw_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-    elif target_width and target_height and tools.has_npp_scale and not enhance:
+    elif target_width and target_height and tools.has_npp_scale and not enhance and use_cuda_hw:
         video_filter = f"scale_npp={target_width}:{target_height}:interp_algo=lanczos"
         hw_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
     else:
@@ -133,17 +127,8 @@ def build_ffmpeg_command(
     ]
     if video_filter:
         cmd.extend(["-vf", video_filter])
+    cmd.extend(encoder_args(video_encoder, quality, "quality"))
     cmd.extend([
-        "-c:v",
-        video_encoder,
-        "-preset",
-        "p6",
-        "-rc",
-        "vbr",
-        "-cq",
-        str(quality),
-        "-b:v",
-        "0",
         "-c:a",
         "copy",
         "-c:s",
@@ -178,13 +163,45 @@ def build_stream_copy_command(
 
 
 def select_video_encoder(tools: ToolInfo, codec: str) -> str:
-    if codec == "hevc" and tools.has_hevc_nvenc:
-        return "hevc_nvenc"
+    if codec == "hevc":
+        if tools.has_hevc_nvenc:
+            return "hevc_nvenc"
+        if tools.has_hevc_amf:
+            return "hevc_amf"
+        return "libx265"
     if tools.has_h264_nvenc:
         return "h264_nvenc"
+    if tools.has_h264_amf:
+        return "h264_amf"
     if tools.has_hevc_nvenc:
         return "hevc_nvenc"
+    if tools.has_hevc_amf:
+        return "hevc_amf"
     return "libx264"
+
+
+def encoder_args(encoder: str, quality: int, preset: str = "balanced") -> list[str]:
+    if encoder.endswith("_nvenc"):
+        return [
+            "-c:v", encoder,
+            "-preset", {"fast": "p4", "balanced": "p4", "quality": "p6"}[preset],
+            "-cq", str(quality),
+            "-b:v", "0",
+        ]
+    if encoder.endswith("_amf"):
+        return [
+            "-c:v", encoder,
+            "-quality", {"fast": "speed", "balanced": "balanced", "quality": "quality"}[preset],
+            "-rc", "cqp",
+            "-qp_i", str(quality),
+            "-qp_p", str(quality),
+            "-qp_b", str(quality),
+        ]
+    return [
+        "-c:v", encoder,
+        "-preset", {"fast": "fast", "balanced": "medium", "quality": "slow"}[preset],
+        "-crf", str(quality),
+    ]
 
 
 def make_work_video_path(output_path: Path, label: str) -> Path:

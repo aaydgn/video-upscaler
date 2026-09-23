@@ -20,6 +20,8 @@ class ToolInfo:
     has_hqdn3d: bool
     has_h264_nvenc: bool
     has_hevc_nvenc: bool
+    has_h264_amf: bool
+    has_hevc_amf: bool
 
 
 def find_executable(name: str) -> str | None:
@@ -119,4 +121,6 @@ def inspect_tools(ffmpeg_path: str | None = None, ffprobe_path: str | None = Non
         has_hqdn3d=" hqdn3d " in filters,
         has_h264_nvenc="h264_nvenc" in encoders,
         has_hevc_nvenc="hevc_nvenc" in encoders,
+        has_h264_amf="h264_amf" in encoders,
+        has_hevc_amf="hevc_amf" in encoders,
     )

@@ -19,7 +19,7 @@ def launch_gui() -> None:
     from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    root.title("NVIDIA Video Upscaler")
+    root.title("Video Upscaler")
     root.geometry("620x520")
     root.minsize(520, 460)
 
@@ -411,8 +411,22 @@ def launch_gui() -> None:
         try:
             tools = inspect_tools()
             parts = ["FFmpeg ✓"]
-            nvenc = "H.264+HEVC" if tools.has_h264_nvenc and tools.has_hevc_nvenc else "H.264" if tools.has_h264_nvenc else "HEVC" if tools.has_hevc_nvenc else None
-            parts.append(f"NVENC {nvenc}" if nvenc else "NVENC ✗")
+            hw_enc = None
+            if tools.has_h264_nvenc or tools.has_hevc_nvenc:
+                codecs = []
+                if tools.has_h264_nvenc:
+                    codecs.append("H.264")
+                if tools.has_hevc_nvenc:
+                    codecs.append("HEVC")
+                hw_enc = f"NVENC {'+'.join(codecs)}"
+            elif tools.has_h264_amf or tools.has_hevc_amf:
+                codecs = []
+                if tools.has_h264_amf:
+                    codecs.append("H.264")
+                if tools.has_hevc_amf:
+                    codecs.append("HEVC")
+                hw_enc = f"AMF {'+'.join(codecs)}"
+            parts.append(hw_enc if hw_enc else "HW encode ✗ (software)")
             parts.append("ESRGAN ✓" if tools.realesrgan else "ESRGAN ✗")
             parts.append("RIFE ✓" if tools.rife else "RIFE ✗")
             try:
@@ -523,7 +537,7 @@ def launch_gui() -> None:
     quality_scale = ttk.Scale(quality_frame, from_=14, to=28, variable=quality_var, orient="horizontal", command=on_quality_change)
     quality_scale.grid(row=0, column=0, sticky="ew")
     ttk.Label(quality_frame, textvariable=quality_var, width=3, anchor="e").grid(row=0, column=1, padx=(8, 0))
-    Tooltip(quality_scale, "NVENC constant quality. Lower = better quality, larger file.\n14 = near-lossless, 19 = balanced, 28 = small file.")
+    Tooltip(quality_scale, "Constant quality. Lower = better quality, larger file.\n14 = near-lossless, 19 = balanced, 28 = small file.")
 
     # --- Action + progress ---
     row += 1
